@@ -1,8 +1,8 @@
 # TikTokApiTest
 
 # aBogus版本
-- aBogus_1.0.19-fix
-- aBogus_1.0.20
+- aBogus_1.0.1.19-fix
+- aBogus_1.0.1.20
 - **仅测试学习使用，如有侵权请[联系我](https://www.app966.cn)删除**
 
 # 使用接口
@@ -12,3 +12,4 @@
 # 限制
 - **每日1000**
 - **禁止频繁大量请求**
+- 如果有问题请在issues中提交
