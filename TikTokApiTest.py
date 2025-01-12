@@ -66,7 +66,7 @@ class TikTokApi:
         :param ua:
         :param data:
         :param ck:
-        :param t: aBogus版本，默认抖音1.0.1.19-fix,t=ju_old=巨量百应1.0.1.15,t=tuan=团长1.0.1.15,t=ju=巨量百应1.0.1.20
+        :param t: aBogus版本,默认douyin=1.0.1.19-fix,ju_old=巨量百应1.0.1.15,tuan=团长1.0.1.15,ju=巨量百应1.0.1.20,doudian=1.0.1.1
         :return:
         """
         sign_url = TikTokApi.host + '/dyapi/web/abogus'
@@ -82,7 +82,6 @@ class TikTokApi:
             'url': url,
             'ua': ua,
             'data': data,
-            'cookie': ck,
             't': t,
             'sign': sign
         }
@@ -712,8 +711,8 @@ if __name__ == '__main__':
     # ttdt = device['data'][0]['device_token']
 
     # web获取视频信息
-    # video_list = [7206592982118616324, 7180333041812819237, 7212918206074309899]
-    # api.get_video_info(video_list)
+    video_list = [7444518837912964388, 7445547661677169931, 7456796563868765450]
+    api.get_video_info(video_list)
 
     sec_uid = 'MS4wLjABAAAAx85E5eHTZn5MfmvdN_9-bqSReegB2KjL5p5rsMkX4mE'
 
@@ -742,4 +741,4 @@ if __name__ == '__main__':
     # api.get_userinfo(sec_uid)
 
     # 通过链接查询巨量百应商品信息
-    api.JuLiang_BatchLink("https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711")
+    # api.JuLiang_BatchLink("https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711")
