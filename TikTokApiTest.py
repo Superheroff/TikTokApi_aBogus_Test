@@ -672,6 +672,26 @@ class TikTokApi:
         print("作品列表", gzip.decompress(ret).decode('utf-8'))
         return ret
 
+    def getBd(self, privateKey=None, cert=None, salt=None):
+        """
+        生成bd_ticket_guard_client_data 不传参为cookieBD 传参则计算req_sign
+        :param privateKey: 私钥 不传参时生成
+        :param cert: X509证书 '/passport/ticket_guard/'获取
+        :param salt: 加密值例如：ticket=xxx&path=xxx&timestamp=xxx
+        :return:
+        """
+        uri = TikTokApi.host + '/dyapi/web/bd'
+        ts = str(time.time()).split('.')[0]
+        sign = self.set_sign
+        data = {"privateKey": privateKey, "cert": cert, "salt": salt, "sign": sign}
+        headers = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        result = requests.post(uri, data=data, headers=headers).text
+        print("bd_ticket_guard_client_data", result)
+        return result
+
 
 if __name__ == '__main__':
     api = TikTokApi('d9ba8ae07d955b83c3b04280f3dc5a4a')
@@ -741,4 +761,42 @@ if __name__ == '__main__':
     # api.get_userinfo(sec_uid)
 
     # 通过链接查询巨量百应商品信息
-    # api.JuLiang_BatchLink("https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711")
+    # api.JuLiang_BatchLink(
+        # "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711")
+
+    # 生成Cookie bd_ticket_guard_client_data
+    result = api.getBd()
+
+    # 生成Headers bd_ticket_guard_client_data 下面X509cert仅为示例非固定
+    X509cert = """
+    -----BEGIN CERTIFICATE-----
+MIIEfTCCBCKgAwIBAgIUXWdS2tzmSoewCWfKFyiWMrJqs/0wCgYIKoZIzj0EAwIw
+MTELMAkGA1UEBhMCQ04xIjAgBgNVBAMMGXRpY2tldF9ndWFyZF9jYV9lY2RzYV8y
+NTYwIBcNMjIxMTE4MDUyMDA2WhgPMjA2OTEyMzExNjAwMDBaMCQxCzAJBgNVBAYT
+AkNOMRUwEwYDVQQDEwxlY2llcy1zZXJ2ZXIwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAASE2llDPlfc8Rq+5J5HXhg4edFjPnCF3Ua7JBoiE/foP9m7L5ELIcvxCgEx
+aRCHbQ8kCCK/ArZ4FX/qCobZAkToo4IDITCCAx0wDgYDVR0PAQH/BAQDAgWgMDEG
+A1UdJQQqMCgGCCsGAQUFBwMBBggrBgEFBQcDAgYIKwYBBQUHAwMGCCsGAQUFBwME
+MCkGA1UdDgQiBCABydxqGrVEHhtkCWTb/vicGpDZPFPDxv82wiuywUlkBDArBgNV
+HSMEJDAigCAypWfqjmRIEo3MTk1Ae3MUm0dtU3qk0YDXeZSXeyJHgzCCAZQGCCsG
+AQUFBwEBBIIBhjCCAYIwRgYIKwYBBQUHMAGGOmh0dHA6Ly9uZXh1cy1wcm9kdWN0
+aW9uLmJ5dGVkYW5jZS5jb20vYXBpL2NlcnRpZmljYXRlL29jc3AwRgYIKwYBBQUH
+MAGGOmh0dHA6Ly9uZXh1cy1wcm9kdWN0aW9uLmJ5dGVkYW5jZS5uZXQvYXBpL2Nl
+cnRpZmljYXRlL29jc3AwdwYIKwYBBQUHMAKGa2h0dHA6Ly9uZXh1cy1wcm9kdWN0
+aW9uLmJ5dGVkYW5jZS5jb20vYXBpL2NlcnRpZmljYXRlL2Rvd25sb2FkLzQ4RjlD
+MEU3QjBDNUE3MDVCOTgyQkU1NTE3MDVGNjQ1QzhDODc4QTguY3J0MHcGCCsGAQUF
+BzAChmtodHRwOi8vbmV4dXMtcHJvZHVjdGlvbi5ieXRlZGFuY2UubmV0L2FwaS9j
+ZXJ0aWZpY2F0ZS9kb3dubG9hZC80OEY5QzBFN0IwQzVBNzA1Qjk4MkJFNTUxNzA1
+RjY0NUM4Qzg3OEE4LmNydDCB5wYDVR0fBIHfMIHcMGygaqBohmZodHRwOi8vbmV4
+dXMtcHJvZHVjdGlvbi5ieXRlZGFuY2UuY29tL2FwaS9jZXJ0aWZpY2F0ZS9jcmwv
+NDhGOUMwRTdCMEM1QTcwNUI5ODJCRTU1MTcwNUY2NDVDOEM4NzhBOC5jcmwwbKBq
+oGiGZmh0dHA6Ly9uZXh1cy1wcm9kdWN0aW9uLmJ5dGVkYW5jZS5uZXQvYXBpL2Nl
+cnRpZmljYXRlL2NybC80OEY5QzBFN0IwQzVBNzA1Qjk4MkJFNTUxNzA1RjY0NUM4
+Qzg3OEE4LmNybDAKBggqhkjOPQQDAgNJADBGAiEAqMjT5ADMdGMeaImoJK4J9jzE
+LqZ573rNjsT3k14pK50CIQCLpWHVKWi71qqqrMjiSDvUhpyO1DpTPRHlavPRuaNm
+ww==
+-----END CERTIFICATE-----
+    """
+    result = json.loads(result)
+    t = "ticket=hash.h5Ijgqm+N/zSeJt41qA2AP9oDVr/NF9P2JFpNQZXDZ8=&path=/passport/token/beat/web/&timestamp=1750433024"
+    api.getBd(result['privateKey'], X509cert, t)
