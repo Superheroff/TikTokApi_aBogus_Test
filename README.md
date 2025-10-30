@@ -5,9 +5,9 @@
 | 版本名             | 使用平台 |
 |-----------------|------|
 | aBogus_1.0.1.1  | 抖店   |
-| aBogus_1.0 | 巨量千川 |
 | aBogus_1.0.1.19-fix | 抖音   |
-| aBogus_1.0.1.20 | 巨量   |
+| aBogus_1.0 | 巨量千川 |
+| aBogus_1.0.1.20 | 巨量百应 |
 
 # bd_ticket_guard_client_data
 - Cookie bd_ticket_guard_client_data生成
