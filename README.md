@@ -12,7 +12,7 @@
 # bd_ticket_guard_client_data
 - Cookie bd_ticket_guard_client_data生成
 - Headers bd-ticket-guard-client-data req_sign计算
-- Headers bd-ticket-guard-client-data reuqest_sign计算
+- Body reuqest_sign计算
 
 # 使用接口
 - ①：`/pc/selection_tool/batch_link`
