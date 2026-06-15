@@ -6,17 +6,18 @@ import json
 import random
 import time
 import re
-from urllib.parse import urlencode, quote, urljoin
+from urllib.parse import urlencode, quote
 import requests
 import math
 import douyin_pb2
 from google.protobuf.json_format import ParseDict
 import uuid
-
+from curl_cffi import requests as curl_requests
 
 
 class TikTokApi:
-    host = 'http://api2.52jan.com'
+    host = 'https://api2.52jan.com'
+    baseUrl = 'http://124.222.92.118:5050'  # 备用
 
     proxy = {
         'host': 'e688.kdltps.com:15818',
@@ -141,8 +142,7 @@ class TikTokApi:
         ts = str(time.time()).split('.')[0]
         header = {
             'cid': self.cid,
-            'timestamp': ts,
-            'user-agent': 'okhttp/3.10.0.12'
+            'timestamp': ts
         }
         sign = self.set_sign
 
@@ -194,12 +194,13 @@ class TikTokApi:
         :param headers:
         :return:
         """
-        sign_url = TikTokApi.host + '/dyapi/xgorgon'
+        sign_url = 'http://124.220.179.225:5050/dyapi/xgorgon'
         ts = str(time.time()).split('.')[0]
         header = {
             'cid': self.cid,
             'timestamp': ts,
-            'user-agent': 'okhttp/3.10.0.12'
+            # 'Content-Type': 'application/json',
+
         }
         sign = self.set_sign
         self.array['url'] = url
@@ -300,7 +301,7 @@ class TikTokApi:
         # headers["X-Gorgon"] = sig["xgorgon"]
         # headers["X-Khronos"] = sig["xkhronos"]
         # headers["X-SS-REQ-TICKET"] = sig["X-SS-REQ-TICKET"]
-        res = requests.get(uri, headers=headers, proxies=proxies).text
+        res = requests.get(uri, headers=headers).text
         print("橱窗列表", res)
         return res
 
@@ -476,19 +477,23 @@ class TikTokApi:
 
     def JuLiangHeaders(self, cookie=''):
         return {
-            'accept': 'application/json, text/plain, */*',
+            'accept': '*/*',
             'accept-language': 'zh-CN,zh;q=0.9',
             'cache-control': 'no-cache',
-            'cookie': cookie,
+            'content-type': 'text/plain;charset=UTF-8',
+            'origin': 'https://buyin.jinritemai.com',
             'pragma': 'no-cache',
             'priority': 'u=1, i',
-            'sec-ch-ua': '"Google Chrome";v="139", "Chromium";v="139", "Not_A Brand";v="24"',
+            'referer': 'https://buyin.jinritemai.com/',
+            'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
             'sec-fetch-dest': 'empty',
             'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+            'sec-fetch-site': 'cross-site',
+            'sec-fetch-storage-access': 'active',
+            'cookie': cookie,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
         }
 
     def JuLiang_BatchLink(self, urls, cookies=None):
@@ -516,34 +521,176 @@ class TikTokApi:
         print("巨量百应商品信息:", resp)
         return resp
 
-    def JuLiang_ShopSku(self, biz_id, cookies=None):
+
+    def get_cookie_value(self, cookie_str, key):
+        from http.cookies import SimpleCookie
+        ck = SimpleCookie()
+        ck.load(cookie_str)
+        return ck.get(key).value if ck.get(key) else None
+
+    def getMsToken(self, cookie_str, msToken=''):
+        url = f'{TikTokApi.host}/dyapi/web/get_msToken'
+        ts = str(int(time.time()))
+        headers = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        sign = self.set_sign
+        params = {
+            "cookie": cookie_str,
+            "sign": sign,
+            "msToken": msToken
+        }
+        result = requests.get(url, params=params, headers=headers).json()
+        return result.get('msToken', '')
+
+
+    def getShopSku(self, promotion_id, cookie_str='', msToken=''):
         """
-        通过商品ID查询商品规格
-        :param cookies:
-        :param biz_id:
-        :return:
+        通过商品ID查询商品sku
+        Args:
+            promotion_id: 商品ID
+            cookie_str:
+            msToken:
         """
 
-        headers = self.JuLiangHeaders(cookies)
-        headers.update({"content-type": "application/json"})
+        # url = f'{TikTokApi.host}/dyapi/web/shop_sku'
+        # ts = str(int(time.time()))
+        # headers = {
+        #     'cid': self.cid,
+        #     'timestamp': ts
+        # }
+        # sign = self.set_sign
+        # params = {
+        #     "cookie": cookie_str,
+        #     "promotion_id": promotion_id,
+        #     "sign": sign,
+        #     "msToken": msToken
+        # }
+        # result = requests.post(url, data=params, headers=headers).text
 
-        data = {"scene_info": {"request_page": 2}, "other_params": {}, "biz_id": biz_id, "biz_id_type": 2,
-                "enter_from": "pc.shopwindow.goods_manager", "data_module": "dynamic",
-                "dynamic_params": {"param_type": 6}, "extra": {"seraph_did": ""}}
-        fp = TikTokApi.get_cookie_value_oneliner(cookies, 's_v_web_id')
-        msToken = TikTokApi.get_cookie_value_oneliner(cookies, 'msToken') or ""
+        headers = self.JuLiangHeaders(cookie)
+        headers['content-type'] = 'application/json'
+        headers['cookie'] = cookie_str
+        headers['referer'] = f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={promotion_id}'
+
+        fp = self.get_cookie_value(cookie, 's_v_web_id') or ''
         params = {
             'verifyFp': fp,
             'fp': fp,
-            'msToken': msToken
+            'msToken': msToken,
         }
-        url = "https://buyin.jinritemai.com/pc/selection/decision/pack_detail?" + urlencode(params)
-        data = json.dumps(data, separators=(',', ':'))
-        a_bogus = self.getABogus(url, ua=headers["user-agent"], t="ju", data=data)
+
+        body = {
+            "scene_info": {"request_page": 2},
+            "other_params": {"colonel_activity_id": ""},
+            "biz_id": promotion_id,
+            "biz_id_type": 2,
+            "enter_from": "pc.selection_square.recommend_main",
+            "data_module": "dynamic",
+            "dynamic_params": {"param_type": 6},
+            "extra": {}
+        }
+
+        json_data = json.dumps(body, separators=(',', ':'))
+        url = f'https://buyin.jinritemai.com/pc/selection/decision/pack_detail?{urlencode(params)}'
+        uri = url.split('?')[1] if '?' in url else url
+        a_bogus = self.getABogus(uri, ua=headers["user-agent"], data=json_data, t='ju')
         url += "&a_bogus=" + a_bogus['abogus']
-        resp = requests.post(url, data=data, headers=headers).text
-        print("巨量百应商品规格:", resp)
-        return resp
+        response = curl_requests.post(
+            url,
+            headers=headers,
+            data=json_data,
+            impersonate="chrome146",
+            timeout=30
+        )
+        print(f"商品 [{promotion_id}] 的SKU:", response.text)
+        return response.text
+
+
+    def getShopList(self, shop_id, page=0, cookie_str='', msToken=''):
+        """根据店铺ID获取店铺商品列表
+        Args:
+            shop_id: 店铺ID
+            page: 翻页游标
+            cookie_str:
+            msToken:
+        Returns:
+            商品列表
+        """
+        url = f'{TikTokApi.host}/dyapi/web/shop_list'
+        ts = str(int(time.time()))
+        headers = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        sign = self.set_sign
+        params = {
+            "cookie": cookie_str,
+            "shop_id": shop_id,
+            "sign": sign,
+            "page": page,
+            "msToken": msToken
+        }
+        result = requests.post(url, data=params, headers=headers).json()
+        print("店铺商品列表", result)
+        return result
+
+
+    def JuLiang_material_list(self, pg=0):
+        """巨量选品广场
+        :param pg: 第一页0，下一页+30
+        """
+        tempCookie = 's_v_web_id=verify_mh25cqr0_kFrExpAc_pQTY_4y0s_8cLd_DrxNMCvmDdGk; qc_tt_tag=0; passport_csrf_token=fc8f6b07421ae775d95641ab829a5fbf; passport_csrf_token_default=fc8f6b07421ae775d95641ab829a5fbf; is_staff_user=false; gfkadpd=2631,22740; _tea_utm_cache_3813=undefined; scmVer=1.0.1.9453; ttwid=1%7Ckimy0lj6g3kkGnScZio9_HcjxwaCUkUSVYLufFm4Prw%7C1762937264%7C9a29ae9e6f916bdf2f08d6202abdfee5e130e7b2704b3f4a6153a8c1dc10a63e; odin_tt=ca0a788e3e7e38c0d879011854118401d2163725b9136bcdfa07e6c65ea14b56426fb107939d2435d7048b2b9d5373f506479518969e6c7ea787f680c1b1e7d0; passport_auth_status=2bcb324c11f18e09eb57307b4ae678d4%2C7b6b24a8f63a79f3c37037bd7e18bda1; passport_auth_status_ss=2bcb324c11f18e09eb57307b4ae678d4%2C7b6b24a8f63a79f3c37037bd7e18bda1; uid_tt=78ab528d86d52c455b3d62365bab3369; uid_tt_ss=78ab528d86d52c455b3d62365bab3369; sid_tt=2c9936e6b3b043fb37e4815e670048eb; sessionid=2c9936e6b3b043fb37e4815e670048eb; sessionid_ss=2c9936e6b3b043fb37e4815e670048eb; ucas_c0_buyin=CkEKBTEuMC4wELSIkp7ztZKKaRi9LyDJ6eCg1cypBiiPETD60OCg1cztAkCzk9HIBkizx43LBlC_vK-goPKusWZYfhIUFGSdUaI05OZMOBdK6mtby7CwWds; ucas_c0_ss_buyin=CkEKBTEuMC4wELSIkp7ztZKKaRi9LyDJ6eCg1cypBiiPETD60OCg1cztAkCzk9HIBkizx43LBlC_vK-goPKusWZYfhIUFGSdUaI05OZMOBdK6mtby7CwWds; sid_guard=2c9936e6b3b043fb37e4815e670048eb%7C1762937267%7C5184000%7CSun%2C+11-Jan-2026+08%3A47%3A47+GMT; session_tlb_tag=sttt%7C15%7CLJk25rOwQ_s35IFeZwBI6__________WPmlm2ti-8YxUGw_C4wesmZvavwTXx4Zo8axIs03OjSU%3D; session_tlb_tag_bk=sttt%7C15%7CLJk25rOwQ_s35IFeZwBI6__________WPmlm2ti-8YxUGw_C4wesmZvavwTXx4Zo8axIs03OjSU%3D; sid_ucp_v1=1.0.0-KGIyYTVjMzFkOGQxZjA0MjYxNGQwZDE4MmRkYWZmNzRjMWVhODQxZWYKGAj60OCg1cztAhCzk9HIBhiPESAMOAhAJhoCbHEiIDJjOTkzNmU2YjNiMDQzZmIzN2U0ODE1ZTY3MDA0OGVi; ssid_ucp_v1=1.0.0-KGIyYTVjMzFkOGQxZjA0MjYxNGQwZDE4MmRkYWZmNzRjMWVhODQxZWYKGAj60OCg1cztAhCzk9HIBhiPESAMOAhAJhoCbHEiIDJjOTkzNmU2YjNiMDQzZmIzN2U0ODE1ZTY3MDA0OGVi; SASID=SID2_7571756393511928115; BUYIN_SASID=SID2_7571756393511928115; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; csrf_session_id=a4e7bae06169f1f189dcb4cf508fe1fd'
+        fp = re.search(r's_v_web_id=(.*?);', tempCookie) or ''
+        if fp:
+            fp = fp.group(1)
+        url = f'https://buyin.jinritemai.com/pc/selection/common/material_list?ewid=b3cc81f1ab7841d91579571fee82d6f5&verifyFp={fp}&fp={fp}&msToken=OoQTZmTPhVZmg9M_ke_FOEUOwlHlz6qrrd0sZSQmzFUusEEmIS3tXF9l-vtku-2g_nn7cYKKPvhPH1cnXwz47KuRSgWUKWSjeNlXN73FA6uvTqOrphG98jij7FsOWI3l8iqSEIqqejIB7NG4rshAa8CcqnoqZVo8I9cJQqrb9Njfi5KrAgB8bmQ%3D'
+        body = {
+            'scene': 'PCSquareFeed',
+            'size': 30,
+            'search_text': '',
+            'cursor': pg,
+            'extra': {
+                'new_session_strategy': '1',
+                'search_id': '2240ef2d8a855155c5a83bb0482ffccf197cd99dd99017347d914442b8d79bf111678ffe7c7db548e1de57831c17e1a5030019891130cf3908aad7b4d90691c0b575106cf5b10f6e5986770134c70f51',
+                'session_id': '2240ef2d8a855155c5a83bb0482ffccf197cd99dd99017347d914442b8d79bf111678ffe7c7db548e1de57831c17e1a5030019891130cf3908aad7b4d90691c0b575106cf5b10f6e5986770134c70f51',
+                'use_kol_product': '1',
+            },
+            'filters': {
+                'FeaturedItems': {
+                    'value': [
+                        'is_first_onshelf_prod_30d',
+                    ],
+                },
+            },
+        }
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'zh-CN,zh;q=0.9',
+            'cache-control': 'no-cache',
+            'content-type': 'application/json',
+            'origin': 'https://buyin.jinritemai.com',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': 'https://buyin.jinritemai.com/dashboard/merch-picking-library',
+            'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+            'cookie': tempCookie,
+        }
+
+        json_data = json.dumps(body, separators=(',', ':'))
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], t="ju", data=json_data)
+        url += "&a_bogus=" + a_bogus['abogus']
+        response = requests.post(url, headers=headers, data=json_data).text
+        print("response2", response)
+        return response
+
 
     def get_old_comment(self, vid, page):
         """
@@ -992,6 +1139,58 @@ class TikTokApi:
         )
         print("直播间关注测试", response.text)
 
+
+    def getlive(self):
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'zh-CN,zh;q=0.9',
+            'agw-js-conv': 'str',
+            'cache-control': 'no-cache',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': 'https://compass.jinritemai.com/shop/chance/rank-product?from_page=%2Fshop%2Fchance%2Frank-search&btm_ppre=a6187.b44747.c0.d0&btm_pre=a6187.b85340.c0.d0&btm_show_id=01c29c03-2943-4c97-8bfb-83c9999c6def',
+            'sec-ch-ua': '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+            'cookie': 'Hm_lvt_b6520b076191ab4b36812da4c90f7a5e=1759996609; qc_tt_tag=0; is_staff_user=false; use_biz_token=true; passport_csrf_token=160a91eb6705845b5b5f03ed94cbe2fb; passport_csrf_token_default=160a91eb6705845b5b5f03ed94cbe2fb; has_biz_token=false; csrf_session_id=df3292de7738ce5274519ff377efc9f9; passport_auth_status=b5e11d3324f8a72c79166a219b490348%2C; passport_auth_status_ss=b5e11d3324f8a72c79166a219b490348%2C; gfkadpd=4499,28161|4499,20590; ttwid=1%7Ckimy0lj6g3kkGnScZio9_HcjxwaCUkUSVYLufFm4Prw%7C1777107073%7Ce5ad78a7b9f47526b7f1a90d92045843d68cdb8a07256b63c7f82af4a305717c; s_v_web_id=verify_moe3orbr_ec319109_bba3_eb53_96ae_bbd6ac40986b; passport_mfa_token=CjF5%2FZuHXnFyR%2FW5zifhIrU7hH%2BAg6b%2FYTqdbs8DGKG2d49ug54Oq28lHaMEmIcTwW0QGkoKPAAAAAAAAAAAAABQWJISGqjsuWQBJUznYR%2FWNeMH7GJvW0NkJulSOE4BREJnD%2Flg3RvoW9LIP4EvJSkgORDD4I8OGPax0WwgAiIBAwufYPk%3D; odin_tt=6580a138b8c48bbaf0272407be8ffd578c4045e8260a29e0f303c464b6a6e317af89e824f7d8d2dc7ac65f866a200a52cb13e9519876df0e430975ec2f9802ef; uid_tt=256dda90587f4e5a46d368f2c115d902; uid_tt_ss=256dda90587f4e5a46d368f2c115d902; sid_tt=b141f0c75899b11d91674d4c597ffe0f; sessionid=b141f0c75899b11d91674d4c597ffe0f; sessionid_ss=b141f0c75899b11d91674d4c597ffe0f; ucas_c0_compass=CkEKBTEuMC4wEI-Ijd74nqD2aRjmJiDYuPCcwK2IASiwITCI8_DMqvWVBED9gbLPBkj9te7RBlCavLOOgsSd9GlYbxIUdDU1Wq-B9m2X57q1S1rmzysDQ5E; ucas_c0_ss_compass=CkEKBTEuMC4wEI-Ijd74nqD2aRjmJiDYuPCcwK2IASiwITCI8_DMqvWVBED9gbLPBkj9te7RBlCavLOOgsSd9GlYbxIUdDU1Wq-B9m2X57q1S1rmzysDQ5E; sid_guard=b141f0c75899b11d91674d4c597ffe0f%7C1777107197%7C5184000%7CWed%2C+24-Jun-2026+08%3A53%3A17+GMT; session_tlb_tag=sttt%7C20%7CsUHwx1iZsR2RZ01MWX_-D__________f-OBhPd63-xNTDKbREC4HafaL_GRAZwu2mmv4jWapGMI%3D; sid_ucp_v1=1.0.0-KDJjYzdkMTIwNDhlMGI1M2Q1N2RiM2M2ODhkNDRjOWQzNDI4MWE4NzEKGQiI8_DMqvWVBBD9gbLPBhiwISAMOAFA6wcaAmxxIiBiMTQxZjBjNzU4OTliMTFkOTE2NzRkNGM1OTdmZmUwZg; ssid_ucp_v1=1.0.0-KDJjYzdkMTIwNDhlMGI1M2Q1N2RiM2M2ODhkNDRjOWQzNDI4MWE4NzEKGQiI8_DMqvWVBBD9gbLPBhiwISAMOAFA6wcaAmxxIiBiMTQxZjBjNzU4OTliMTFkOTE2NzRkNGM1OTdmZmUwZg; LUOPAN_DT=session_7632616844062540038; COMPASS_LUOPAN_DT=session_7632616844062540038; ecom_us_lt_compass=16b8b47eefb3831fab56a3ab4e4efb2fb67d4de0a93f453b083ea37c57585a48; ecom_us_lt_ss_compass=16b8b47eefb3831fab56a3ab4e4efb2fb67d4de0a93f453b083ea37c57585a48',
+        }
+
+        params = {
+            'page_no': '1',
+            'page_size': '10',
+            'industry_id': '13',
+            'category_id': '1000001823',
+            'brand_type': '-1',
+            'price_bin': '不限',
+            'search_info': '',
+            'rank_data_type': '1',
+            'begin_date': '2026/04/18 00:00:00',
+            'end_date': '2026/04/24 00:00:00',
+            'date_type': '21',
+            'activity_id': '',
+            '_lid': '085965688488',
+            'msToken': '3JnvAxrfd5pACtXp3s5TyOKC7cXlmXzHWhgC-n5RCMr3VdD8bN5FU44iboL1nDFK9S0ZJKvZza5AK3nlGG3Neh-0QYYllCxaBBQHdtxIioSb8U1kS__ufrpQsIIG-pqC5xjjSCOp60QO2vBORg40ytnV2GDGMTjeZjOlxgdBD4mRfpmiaGePwQ==',
+            # 'a_bogus': 'Q645kzSLEd5fPplSucQqtA1lK9VlNPSy5ei/bGKN9qPQa10Yy--kbce/axqQ-WVVKmM8ZMC7cpsMCjdbYUiiZ/-kwmhfux7y84VC9XfogqNZTFt8EHbOCz0zowMu057ieQ5tiIXUgUaoZVOWg1QD/3l9SA/F5RgZMHCjkoYbxIa31zglE3nePQGsYXiqDf==',
+            'verifyFp': 'verify_moe3orbr_ec319109_bba3_eb53_96ae_bbd6ac40986b',
+            'fp': 'verify_moe3orbr_ec319109_bba3_eb53_96ae_bbd6ac40986b',
+        }
+        url = 'https://compass.jinritemai.com/compass_api/shop/product/product_rank/live_product?'
+        url += urlencode(params)
+        a_bogus = self.getABogus(url, ua=headers["user-agent"])
+        url += '&a_bogus=' + a_bogus['abogus']
+        print(url)
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+        )
+
+        print(response.text)
+
     def sendMessage(self, content):
         # s_sdk_server_cert_key = {"data":"{\"ec_privateKey\":\"-----BEGIN PRIVATE KEY-----\\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgfidh6GJrlbC4s52OyjblDlychyRVUEyd1/kwOn+4qZqhRANCAAQiGjFQQQbRjQLltEzhJEFQoAiQqKq8K2A5lcfwiar91wCxJGu9qm/6lLwW8Cxfqu5FezGw8LUZTF8V8pZej9OJ\\n-----END PRIVATE KEY-----\",\"ec_publicKey\":\"-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIhoxUEEG0Y0C5bRM4SRBUKAIkKiqvCtgOZXH8Imq/dcAsSRrvapv+pS8FvAsX6ruRXsxsPC1GUxfFfKWXo/TiQ==\\n-----END PUBLIC KEY-----\",\"ec_csr\":\"\"}"}
         web_protect = {
@@ -1179,6 +1378,8 @@ if __name__ == '__main__':
     ApiInfo = api.get_ApiInfo()
     print('Api信息:' + ApiInfo)
 
+    # api.getlive()
+
     # app取设备号
     # device = api.get_device()
 
@@ -1252,13 +1453,26 @@ if __name__ == '__main__':
     # 获取用户信息
     # api.get_userinfo(sec_uid)
 
-    # 通过链接查询巨量百应商品信息
+    # 通过链接查询商品信息
     # api.JuLiang_BatchLink(
-    #     "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711")
+    #     "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711"
+    # )
 
-    cookies = 'ttcid=3d3c0f31a1d241e89c75dfceaa639b1e12; tt_scid=96aEmVJNCjafaBr2oRytoHoyOvgQSllyuKshmVpGy4be3Z76VBqzSpqT-34emy9Df872; gfkadpd=2631,22740; s_v_web_id=verify_mgt4m2b8_2BTffP9a_0O1O_4My9_Agx8_si5a1bOXk8Cr; passport_csrf_token=255c9518da7aa75d341f370f063faffa; passport_csrf_token_default=255c9518da7aa75d341f370f063faffa; ttwid=1%7CA62kHO_fEpUzz34QER10djeGm09OKGPwPjN59Q1_eUQ%7C1760598336%7C5f53d9e9e12266416d2691ebb712c6eded8119377538888d1f2f947c8e941770; odin_tt=e2d610c30508df90fe9790054bc82a4376941c9a1cbcc02dcf000d844e8472d0714ba7d71fb3bfdd6f8c2476caf3846984d97e1a273e2b898bbb719246009239; passport_auth_status=819ca882b87945ed2606c412cb0d3cd8%2C; passport_auth_status_ss=819ca882b87945ed2606c412cb0d3cd8%2C; uid_tt=d1bc2145ae5050470acf3e55382d9e7d; uid_tt_ss=d1bc2145ae5050470acf3e55382d9e7d; sid_tt=3a0f1968049244dfdaedc18042f45941; sessionid=3a0f1968049244dfdaedc18042f45941; sessionid_ss=3a0f1968049244dfdaedc18042f45941; is_staff_user=false; ucas_c0_buyin=CkEKBTEuMC4wEICIiPT7p6n4aBi9LyCEnaDIisztBiiPETDt4ICur_TDBEDBysLHBkjB_v7JBlCzvJjOic_8hWZYfhIURpdytysio_tjYlV5itdwZJhXUmc; ucas_c0_ss_buyin=CkEKBTEuMC4wEICIiPT7p6n4aBi9LyCEnaDIisztBiiPETDt4ICur_TDBEDBysLHBkjB_v7JBlCzvJjOic_8hWZYfhIURpdytysio_tjYlV5itdwZJhXUmc; sid_guard=3a0f1968049244dfdaedc18042f45941%7C1760601409%7C5184000%7CMon%2C+15-Dec-2025+07%3A56%3A49+GMT; session_tlb_tag=sttt%7C13%7COg8ZaASSRN_a7cGAQvRZQf_________istwuinrDSNvM6wQqg3A14jNkAPFEBndlXcJ6EuKU3VA%3D; sid_ucp_v1=1.0.0-KGRhMmViOWM2YzdiODllNTI3ZTgxYTE2YTI4ZmM2YzI4NWI4OTAwNWMKGAjt4ICur_TDBBDBysLHBhiPESAMOAhAJhoCbHEiIDNhMGYxOTY4MDQ5MjQ0ZGZkYWVkYzE4MDQyZjQ1OTQx; ssid_ucp_v1=1.0.0-KGRhMmViOWM2YzdiODllNTI3ZTgxYTE2YTI4ZmM2YzI4NWI4OTAwNWMKGAjt4ICur_TDBBDBysLHBhiPESAMOAhAJhoCbHEiIDNhMGYxOTY4MDQ5MjQ0ZGZkYWVkYzE4MDQyZjQ1OTQx; SASID=SID2_7561723820806848810; BUYIN_SASID=SID2_7561723820806848810; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; x-web-secsdk-uid=056e66e9-5d42-4737-b6dc-cb851d7a81bc; _tea_utm_cache_3813=undefined; scmVer=1.0.1.9400; csrf_session_id=6cec376249cb8e423b09e7a6f93b2cdd'
-    # 通过商品id查询巨量百应商品规格
-    # api.JuLiang_ShopSku(biz_id='3723383251344225544', cookies=cookies)
+    # 获取msToken
+    cookies = '_tea_utm_cache_3813=undefined; s_v_web_id=verify_mq839gs3_FtSPSPx7_DcBy_44tD_BOB8_x8r92H7VuHnI; scmVer=1.0.2.1047; passport_csrf_token=63461a457b12428298ccea0f43712dba; passport_csrf_token_default=63461a457b12428298ccea0f43712dba; is_staff_user=false; has_biz_token=false; ttcid=57a1d7fb6b55426facfabaadebe7252d18; gfkadpd=2631,22740; csrf_session_id=316848ac3ce5cd23564f3bd9ac1c5154; _tea_utm_cache_2631=undefined; MONITOR_WEB_ID=882b36a4-98bd-4323-a39f-c242e81b3111; op_session=; ttwid=1%7CTtDt58ihKpgdUbyBea4-YJRzWk_XW2SI8GgZmEkecLc%7C1781537463%7Cff44d528670c6f0f4ecdcbe7a820188bc9b2a393a7ffc9f701a96517a1046eab; odin_tt=f481162131b1001786b4f5bd682bca4ca3f40c43f56acbaf839d1c5446604ada1b488d4ba6b2d469acd3e5db82eddd413f67a07b0458d671f047ba7438d8bb90; passport_auth_status=89f4c7999065af3f8d2312f62a9d0ccf%2Cf6a303b72ced7bb99eb5c96d4de06265; passport_auth_status_ss=89f4c7999065af3f8d2312f62a9d0ccf%2Cf6a303b72ced7bb99eb5c96d4de06265; uid_tt=0152b6b5ec96381a61d398ae0a52a59d; uid_tt_ss=0152b6b5ec96381a61d398ae0a52a59d; sid_tt=7dfd2203f828653e10e4e791c59bb7b7; sessionid=7dfd2203f828653e10e4e791c59bb7b7; sessionid_ss=7dfd2203f828653e10e4e791c59bb7b7; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; ucas_c0_buyin=CkEKBTEuMC4wEIqIh8qIk4eYahi9LyCElPCNsKyhBiiPETCK8YDZ8K24A0CjucDRBkij7fzTBlCivNLKnP6CmGpYfhIUCuR8Xkb-Ah0iBr9JeBXo0blGQNQ; ucas_c0_ss_buyin=CkEKBTEuMC4wEIqIh8qIk4eYahi9LyCElPCNsKyhBiiPETCK8YDZ8K24A0CjucDRBkij7fzTBlCivNLKnP6CmGpYfhIUCuR8Xkb-Ah0iBr9JeBXo0blGQNQ; sid_guard=7dfd2203f828653e10e4e791c59bb7b7%7C1781537955%7C5184000%7CFri%2C+14-Aug-2026+15%3A39%3A15+GMT; session_tlb_tag=sttt%7C7%7Cff0iA_goZT4Q5OeRxZu3t_________-edKT1FqLy7E1YnIlAyAgwDGh6qJCdbSNaP8ppwGYH_Pw%3D; sid_ucp_v1=1.0.0-KDM0ODU2YjU5ZTI3ZTMzNjE2NjNjNWY3YzI5ZThjMDc3YmU2ZjQ0NTkKGAiK8YDZ8K24AxCjucDRBhiPESAMOAhAJhoCbGYiIDdkZmQyMjAzZjgyODY1M2UxMGU0ZTc5MWM1OWJiN2I3; ssid_ucp_v1=1.0.0-KDM0ODU2YjU5ZTI3ZTMzNjE2NjNjNWY3YzI5ZThjMDc3YmU2ZjQ0NTkKGAiK8YDZ8K24AxCjucDRBhiPESAMOAhAJhoCbGYiIDdkZmQyMjAzZjgyODY1M2UxMGU0ZTc5MWM1OWJiN2I3; SASID=SID2_7651641675819139362; BUYIN_SASID=SID2_7651641675819139362; ecom_us_lt_buyin=f43f6b0e1da0cfb3359e85c75f54e6bf17e6a909f5fce7c4dac2566edaa48dc3; ecom_us_lt_ss_buyin=f43f6b0e1da0cfb3359e85c75f54e6bf17e6a909f5fce7c4dac2566edaa48dc3; tt_scid=gZ7UoDbxLe7BeO7JjOOBjW8MwvingXt8EArXZIBZGlPK1kBMDnPi91z-Cs3F8hPu8c3f'
+    msToken = api.getMsToken(cookies)
+    print("msToken", msToken)
+
+    # 通过商品id查询商品SKU
+    api.getShopSku(promotion_id='3815583873044185154', cookie_str=cookies, msToken=msToken)
+
+    # 店铺商品
+    api.getShopList(shop_id='182473628', page=0, cookie_str=cookies, msToken=msToken)
+
+    # 选品广场
+    # api.JuLiang_material_list()
+
+
 
     # 生成Cookie bd_ticket_guard_client_data
 #     result = api.getBd()
