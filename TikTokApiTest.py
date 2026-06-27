@@ -15,8 +15,8 @@ import uuid
 
 
 class TikTokApi:
-    # host = 'https://api2.52jan.com'
-    host = 'http://124.222.92.118:5050'  # 备用
+    host = 'https://api2.52jan.com'
+    # host = 'http://124.222.92.118:5050'  # 备用
 
     proxy = {
         'host': 'e688.kdltps.com:15818',
@@ -1564,8 +1564,8 @@ if __name__ == '__main__':
 
     headers = api.JuLiangHeaders(cookie_str=cookies)
     # print(headers)
-    msToken = api.getMsToken(head=headers)
-    print("生成msToken", msToken)
+    # msToken = api.getMsToken(head=headers)
+    # print("生成msToken", msToken)
 
     # msToken = api.getMsToken(head=headers, msToken=msToken)
     # print("更新msToken", msToken)
@@ -1574,7 +1574,7 @@ if __name__ == '__main__':
     api.getShopSku(promotion_id='3826503724214386695', cookie_str=cookies)
 
     # 店铺商品
-    api.getShopList(shop_id='182473628', page=0, cookie_str=cookies, msToken=msToken)
+    # api.getShopList(shop_id='182473628', page=0, cookie_str=cookies, msToken=msToken)
 
     # 商品详情
     api.JuLiang_ShopInfo(promotion_id='3826503724214386695', cookie_str=cookies)
