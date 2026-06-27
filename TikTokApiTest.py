@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import base64
+
 import gzip
 import hashlib
 import json
@@ -12,12 +12,11 @@ import math
 import douyin_pb2
 from google.protobuf.json_format import ParseDict
 import uuid
-from curl_cffi import requests as curl_requests
 
 
 class TikTokApi:
-    host = 'https://api2.52jan.com'
-    baseUrl = 'http://124.222.92.118:5050'  # 备用
+    # host = 'https://api2.52jan.com'
+    host = 'http://124.222.92.118:5050'  # 备用
 
     proxy = {
         'host': 'e688.kdltps.com:15818',
@@ -475,7 +474,7 @@ class TikTokApi:
         print('web评论列表：', resp)
         return resp
 
-    def JuLiangHeaders(self, cookie=''):
+    def JuLiangHeaders(self, cookie_str=''):
         return {
             'accept': '*/*',
             'accept-language': 'zh-CN,zh;q=0.9',
@@ -492,7 +491,7 @@ class TikTokApi:
             'sec-fetch-mode': 'cors',
             'sec-fetch-site': 'cross-site',
             'sec-fetch-storage-access': 'active',
-            'cookie': cookie,
+            'cookie': cookie_str,
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
         }
 
@@ -528,51 +527,68 @@ class TikTokApi:
         ck.load(cookie_str)
         return ck.get(key).value if ck.get(key) else None
 
-    def getMsToken(self, cookie_str, msToken=''):
+    def getMsToken(self, head:dict, msToken=''):
         url = f'{TikTokApi.host}/dyapi/web/get_msToken'
         ts = str(int(time.time()))
         headers = {
             'cid': self.cid,
-            'timestamp': ts
+            'timestamp': ts,
+            'content-type': 'application/json',
         }
         sign = self.set_sign
         params = {
-            "cookie": cookie_str,
             "sign": sign,
-            "msToken": msToken
+            "msToken": msToken,
+            "headers": head
         }
-        result = requests.get(url, params=params, headers=headers).json()
+        result = requests.post(url, json=params, headers=headers).json()
+        print(result)
         return result.get('msToken', '')
 
+    def get_token(self, cookie_str, biz_id):
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'zh-CN,zh;q=0.9',
+            'cache-control': 'no-cache',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={biz_id}',
+            'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+            'x-secsdk-csrf-request': '1',
+            'x-secsdk-csrf-version': '1.2.22',
+            'cookie': cookie_str
+        }
+        response = requests.head('https://buyin.jinritemai.com/pc/selection/common/btm_mapping', headers=headers)
+        csrf_token = response.headers.get('x-ware-csrf-token')
+        if csrf_token:
+            csrf_token = csrf_token.split(',')[1]
+        return csrf_token
 
-    def getShopSku(self, promotion_id, cookie_str='', msToken=''):
+
+    def getShopSku(self, promotion_id, cookie_str=''):
         """
-        通过商品ID查询商品sku
+        通过商品ID查询商品规格
         Args:
             promotion_id: 商品ID
-            cookie_str:
-            msToken:
+            cookie_str: cookie字符串
+        Returns:
+            商品SKU
         """
 
-        # url = f'{TikTokApi.host}/dyapi/web/shop_sku'
-        # ts = str(int(time.time()))
-        # headers = {
-        #     'cid': self.cid,
-        #     'timestamp': ts
-        # }
-        # sign = self.set_sign
-        # params = {
-        #     "cookie": cookie_str,
-        #     "promotion_id": promotion_id,
-        #     "sign": sign,
-        #     "msToken": msToken
-        # }
-        # result = requests.post(url, data=params, headers=headers).text
-
-        headers = self.JuLiangHeaders(cookie)
+        headers = self.JuLiangHeaders(cookie_str=cookie_str)
         headers['content-type'] = 'application/json'
-        headers['cookie'] = cookie_str
         headers['referer'] = f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={promotion_id}'
+        msToken = self.getMsToken(head=headers)
+        print("生成msToken", msToken)
+        time.sleep(0.1)
+        msToken = self.getMsToken(head=headers, msToken=msToken)
+        print("更新msToken", msToken)
 
         fp = self.get_cookie_value(cookie, 's_v_web_id') or ''
         params = {
@@ -594,17 +610,18 @@ class TikTokApi:
 
         json_data = json.dumps(body, separators=(',', ':'))
         url = f'https://buyin.jinritemai.com/pc/selection/decision/pack_detail?{urlencode(params)}'
-        uri = url.split('?')[1] if '?' in url else url
-        a_bogus = self.getABogus(uri, ua=headers["user-agent"], data=json_data, t='ju')
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], data=json_data, t='ju')
         url += "&a_bogus=" + a_bogus['abogus']
-        response = curl_requests.post(
+        csrf_token = self.get_token(cookie, promotion_id)
+        print("csrf_token", csrf_token)
+        headers['content-type'] = 'application/json'
+        headers['x-secsdk-csrf-token'] = csrf_token
+        response = requests.post(
             url,
             headers=headers,
-            data=json_data,
-            impersonate="chrome146",
-            timeout=30
+            data=json_data
         )
-        print(f"商品 [{promotion_id}] 的SKU:", response.text)
+        print("sku", response.text)
         return response.text
 
 
@@ -618,23 +635,105 @@ class TikTokApi:
         Returns:
             商品列表
         """
-        url = f'{TikTokApi.host}/dyapi/web/shop_list'
-        ts = str(int(time.time()))
-        headers = {
-            'cid': self.cid,
-            'timestamp': ts
-        }
-        sign = self.set_sign
+        fp = self.get_cookie_value(cookie, 's_v_web_id')
         params = {
-            "cookie": cookie_str,
-            "shop_id": shop_id,
-            "sign": sign,
-            "page": page,
-            "msToken": msToken
+            'ewid': '',
+            'seraph_did': '',
+            'verifyFp': fp,
+            'fp': fp,
+            'msToken': msToken,
         }
-        result = requests.post(url, data=params, headers=headers).json()
-        print("店铺商品列表", result)
-        return result
+
+        body = {
+            'scene': 'PCShopDetailFeed',
+            'cursor': page,
+            'size': 10,
+            'extra': {
+                'shop_id': shop_id,
+            },
+            'filters': {},
+        }
+        headers = self.JuLiangHeaders(cookie_str)
+        headers['content-type'] = 'application/json'
+        json_data = json.dumps(body, separators=(',', ':'))
+        url = f'https://buyin.jinritemai.com/pc/selection/common/material_list?{urlencode(params)}'
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], data=json_data, t='ju')
+        # print(a_bogus)
+        url += "&a_bogus=" + a_bogus['abogus']
+        response = requests.post(url, headers=headers, data=json_data).text
+        print("店铺商品列表", response)
+        return response
+
+    def JuLiang_ShopInfo(self, promotion_id, cookie_str='', sale: bool = False):
+        """
+        通过商品ID查询商品详情
+        Args:
+            promotion_id: 商品ID
+            cookie_str:
+            sale: 是否获取销量，默认否
+        Returns:
+            商品SKU
+        """
+
+        headers = self.JuLiangHeaders(cookie_str=cookie_str)
+        headers['content-type'] = 'application/json'
+        headers['referer'] = f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={promotion_id}'
+        msToken = self.getMsToken(head=headers)
+        print("生成msToken", msToken)
+        time.sleep(0.1)
+        msToken = self.getMsToken(head=headers, msToken=msToken)
+        print("更新msToken", msToken)
+
+        fp = self.get_cookie_value(cookie, 's_v_web_id') or ''
+        params = {
+            'verifyFp': fp,
+            'fp': fp,
+            'msToken': msToken,
+        }
+
+        body = {
+            'scene_info': {
+                'request_page': 2,
+            },
+            'other_params': {
+                'colonel_activity_id': '',
+            },
+            'biz_id': promotion_id,
+            'biz_id_type': 2,
+            'enter_from': 'pc.selection_square.recommend_main',
+            'data_module': 'core',
+            'extra': {},
+        }
+        if sale:
+            body = {
+                'scene_info': {
+                    'request_page': 2,
+                },
+                'biz_id': promotion_id,
+                'biz_id_type': 2,
+                'enter_from': 'pc.selection_square.recommend_main',
+                'data_module': 'pc-non-core',
+                'extra': {
+                    'use_kol_product': '1',
+                },
+            }
+
+        json_data = json.dumps(body, separators=(',', ':'))
+        url = f'https://buyin.jinritemai.com/pc/selection/decision/pack_detail?{urlencode(params)}'
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], data=json_data, t='ju')
+        url += "&a_bogus=" + a_bogus['abogus']
+        csrf_token = self.get_token(cookie, promotion_id)
+        # print("csrf_token", csrf_token)
+        headers['content-type'] = 'application/json'
+        headers['x-secsdk-csrf-token'] = csrf_token
+        # print(headers)
+        response = requests.post(
+            url,
+            headers=headers,
+            data=json_data
+        )
+        print(f"商品{"销量信息" if sale else "详情信息"}", response.text)
+        return response.text
 
 
     def JuLiang_material_list(self, pg=0):
@@ -1458,19 +1557,31 @@ if __name__ == '__main__':
     #     "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711"
     # )
 
-    # 获取msToken
-    cookies = '_tea_utm_cache_3813=undefined; s_v_web_id=verify_mq839gs3_FtSPSPx7_DcBy_44tD_BOB8_x8r92H7VuHnI; scmVer=1.0.2.1047; passport_csrf_token=63461a457b12428298ccea0f43712dba; passport_csrf_token_default=63461a457b12428298ccea0f43712dba; is_staff_user=false; has_biz_token=false; ttcid=57a1d7fb6b55426facfabaadebe7252d18; gfkadpd=2631,22740; csrf_session_id=316848ac3ce5cd23564f3bd9ac1c5154; _tea_utm_cache_2631=undefined; MONITOR_WEB_ID=882b36a4-98bd-4323-a39f-c242e81b3111; op_session=; ttwid=1%7CTtDt58ihKpgdUbyBea4-YJRzWk_XW2SI8GgZmEkecLc%7C1781537463%7Cff44d528670c6f0f4ecdcbe7a820188bc9b2a393a7ffc9f701a96517a1046eab; odin_tt=f481162131b1001786b4f5bd682bca4ca3f40c43f56acbaf839d1c5446604ada1b488d4ba6b2d469acd3e5db82eddd413f67a07b0458d671f047ba7438d8bb90; passport_auth_status=89f4c7999065af3f8d2312f62a9d0ccf%2Cf6a303b72ced7bb99eb5c96d4de06265; passport_auth_status_ss=89f4c7999065af3f8d2312f62a9d0ccf%2Cf6a303b72ced7bb99eb5c96d4de06265; uid_tt=0152b6b5ec96381a61d398ae0a52a59d; uid_tt_ss=0152b6b5ec96381a61d398ae0a52a59d; sid_tt=7dfd2203f828653e10e4e791c59bb7b7; sessionid=7dfd2203f828653e10e4e791c59bb7b7; sessionid_ss=7dfd2203f828653e10e4e791c59bb7b7; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; ucas_c0_buyin=CkEKBTEuMC4wEIqIh8qIk4eYahi9LyCElPCNsKyhBiiPETCK8YDZ8K24A0CjucDRBkij7fzTBlCivNLKnP6CmGpYfhIUCuR8Xkb-Ah0iBr9JeBXo0blGQNQ; ucas_c0_ss_buyin=CkEKBTEuMC4wEIqIh8qIk4eYahi9LyCElPCNsKyhBiiPETCK8YDZ8K24A0CjucDRBkij7fzTBlCivNLKnP6CmGpYfhIUCuR8Xkb-Ah0iBr9JeBXo0blGQNQ; sid_guard=7dfd2203f828653e10e4e791c59bb7b7%7C1781537955%7C5184000%7CFri%2C+14-Aug-2026+15%3A39%3A15+GMT; session_tlb_tag=sttt%7C7%7Cff0iA_goZT4Q5OeRxZu3t_________-edKT1FqLy7E1YnIlAyAgwDGh6qJCdbSNaP8ppwGYH_Pw%3D; sid_ucp_v1=1.0.0-KDM0ODU2YjU5ZTI3ZTMzNjE2NjNjNWY3YzI5ZThjMDc3YmU2ZjQ0NTkKGAiK8YDZ8K24AxCjucDRBhiPESAMOAhAJhoCbGYiIDdkZmQyMjAzZjgyODY1M2UxMGU0ZTc5MWM1OWJiN2I3; ssid_ucp_v1=1.0.0-KDM0ODU2YjU5ZTI3ZTMzNjE2NjNjNWY3YzI5ZThjMDc3YmU2ZjQ0NTkKGAiK8YDZ8K24AxCjucDRBhiPESAMOAhAJhoCbGYiIDdkZmQyMjAzZjgyODY1M2UxMGU0ZTc5MWM1OWJiN2I3; SASID=SID2_7651641675819139362; BUYIN_SASID=SID2_7651641675819139362; ecom_us_lt_buyin=f43f6b0e1da0cfb3359e85c75f54e6bf17e6a909f5fce7c4dac2566edaa48dc3; ecom_us_lt_ss_buyin=f43f6b0e1da0cfb3359e85c75f54e6bf17e6a909f5fce7c4dac2566edaa48dc3; tt_scid=gZ7UoDbxLe7BeO7JjOOBjW8MwvingXt8EArXZIBZGlPK1kBMDnPi91z-Cs3F8hPu8c3f'
-    msToken = api.getMsToken(cookies)
-    print("msToken", msToken)
+    # 获取msToken，userAgent仅支持谷歌浏览器149版本，否则会封号
+    cookies = ''
+    if not cookies:
+        print("请输入cookie")
+
+    headers = api.JuLiangHeaders(cookie_str=cookies)
+    # print(headers)
+    msToken = api.getMsToken(head=headers)
+    print("生成msToken", msToken)
+
+    # msToken = api.getMsToken(head=headers, msToken=msToken)
+    # print("更新msToken", msToken)
 
     # 通过商品id查询商品SKU
-    api.getShopSku(promotion_id='3815583873044185154', cookie_str=cookies, msToken=msToken)
+    api.getShopSku(promotion_id='3826503724214386695', cookie_str=cookies)
 
     # 店铺商品
     api.getShopList(shop_id='182473628', page=0, cookie_str=cookies, msToken=msToken)
 
+    # 商品详情
+    api.JuLiang_ShopInfo(promotion_id='3826503724214386695', cookie_str=cookies)
+
     # 选品广场
     # api.JuLiang_material_list()
+
 
 
 
