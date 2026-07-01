@@ -1444,6 +1444,42 @@ class TikTokApi:
         # print("sendMessage:", response.text)
 
 
+
+def test():
+    _page = 0
+    _msToken = ''
+    _csrf_token = ''
+    result = api.getShopList(shop_id='182473628', page=_page, cookie_str=cookies, msToken=_msToken)
+    json_data = json.loads(result)
+    print(json_data)
+    for data in json_data['data']['summary_promotions']:
+        _promotion_id = data['promotion_id']
+        _product_id = data['product_id']
+        sku_result = api.getShopSku(promotion_id=_promotion_id, cookie_str=cookies, msToken=_msToken, csrf_token=_csrf_token)
+        sku_result = json.loads(sku_result)
+        params_sku = sku_result['params']
+        if '登录' in sku_result['response']:
+            print("请重新登录")
+            break
+        sku_result_json = json.loads(sku_result['response'])
+        # print("商品sku_response:::", sku_result_json)
+        # 复用msToken,csrf_token
+        _msToken = params_sku['msToken']
+        _msToken = params_sku['csrf_token']
+        for item_sku in sku_result_json['data']['model']['sku_panel_data']['skus_spec_component']['sku_specs_list']:
+            print(item_sku)
+
+
+        time.sleep(1)
+
+
+
+
+
+
+
+
+
 if __name__ == '__main__':
     api = TikTokApi('d9ba8ae07d955b83c3b04280f3dc5a4a')
     cookie = ""
@@ -1532,10 +1568,10 @@ if __name__ == '__main__':
     # )
 
     # 获取msToken，userAgent仅支持谷歌浏览器149版本，否则会封号，需要自己组装strData才支持其它版本
-    cookies = 'gfkadpd=2631,22740; s_v_web_id=verify_mqz76y36_js3Ps3Jr_0mL7_4gIV_B6Tv_2AOOthpE7qjR; passport_csrf_token=0a59ba5359d19dcd458c1e6960ad1b3f; passport_csrf_token_default=0a59ba5359d19dcd458c1e6960ad1b3f; is_staff_user=false; has_biz_token=false; _tea_utm_cache_3813=undefined; scmVer=1.0.2.1278; ttcid=6e10d0e1b4af4d168033ed65108c86fd34; csrf_session_id=316848ac3ce5cd23564f3bd9ac1c5154; tt_scid=JAmLy-pVX7xM8.wYoz-KrRKGKDP7iYhl0akZBo2OwQ0JQcEYXrDQovZHwdmgZsOQ9968; ttwid=1%7CTtDt58ihKpgdUbyBea4-YJRzWk_XW2SI8GgZmEkecLc%7C1782834847%7C87c71d3d365f820108dd4c527eb2aa88a276297063e11ba58282e9f51cd2ca56; odin_tt=ae758e404a330545f7af7d9419b3aee2d337cb3c1b925e9dd2eb96633623ee0553c75c618648ceb28b41eb3f3d308c8959d4aef5cbfb1ec637a85a75bb83ded9; passport_auth_status=33353f17e388c8f216028e7fae8bd57a%2C1606a1fee8d8249b32612bb92288772b; passport_auth_status_ss=33353f17e388c8f216028e7fae8bd57a%2C1606a1fee8d8249b32612bb92288772b; uid_tt=b0a0000b04b214dc956a693aad7594ae; uid_tt_ss=b0a0000b04b214dc956a693aad7594ae; sid_tt=207607fb7094912409ca0cb05432c329; sessionid=207607fb7094912409ca0cb05432c329; sessionid_ss=207607fb7094912409ca0cb05432c329; ucas_c0_buyin=CkEKBTEuMC4wEKSIkPLo0vmhahi9LyDk4NDyw6z5AiiPETCK8YDZ8K24A0CizY_SBkiigczUBlCGvM3O4qnzoWpYfhIUT6ZwAKe9wvn7YwqgudMpg7Ex4TQ; ucas_c0_ss_buyin=CkEKBTEuMC4wEKSIkPLo0vmhahi9LyDk4NDyw6z5AiiPETCK8YDZ8K24A0CizY_SBkiigczUBlCGvM3O4qnzoWpYfhIUT6ZwAKe9wvn7YwqgudMpg7Ex4TQ; sid_guard=207607fb7094912409ca0cb05432c329%7C1782834850%7C5184000%7CSat%2C+29-Aug-2026+15%3A54%3A10+GMT; session_tlb_tag=sttt%7C13%7CIHYH-3CUkSQJygywVDLDKf_________3REwDASRWHuwYX_22UVZRujd3JrDBrY-pOSOz2xIKHcE%3D; sid_ucp_v1=1.0.0-KGQ3OGUyNWJkNzdkYmMyZGI2MjgyYmUzYTBjMGQ5NWQ2MjYyNzJmMTMKGAiK8YDZ8K24AxCizY_SBhiPESAMOAhAJhoCaGwiIDIwNzYwN2ZiNzA5NDkxMjQwOWNhMGNiMDU0MzJjMzI5; ssid_ucp_v1=1.0.0-KGQ3OGUyNWJkNzdkYmMyZGI2MjgyYmUzYTBjMGQ5NWQ2MjYyNzJmMTMKGAiK8YDZ8K24AxCizY_SBhiPESAMOAhAJhoCaGwiIDIwNzYwN2ZiNzA5NDkxMjQwOWNhMGNiMDU0MzJjMzI5; SASID=SID2_7657215671105323307; BUYIN_SASID=SID2_7657215671105323307; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; ecom_us_lt_buyin=804aaabdad138e1db40b4d0dbfa9d19e8b9410efed8c9de40ae0614f4922dd4e; ecom_us_lt_ss_buyin=804aaabdad138e1db40b4d0dbfa9d19e8b9410efed8c9de40ae0614f4922dd4e'
+    cookies = 'gfkadpd=2631,22740; s_v_web_id=verify_mr20xts5_kMGEXC9u_LEx1_4204_8EHD_vpeE5s3wENPo; passport_csrf_token=2fd773eaf3f6b09cccbacae7b466bc49; passport_csrf_token_default=2fd773eaf3f6b09cccbacae7b466bc49; is_staff_user=false; has_biz_token=false; x-web-secsdk-uid=74eb2c8b-6ba9-4628-9780-2d05507c8d84; _tea_utm_cache_3813=undefined; scmVer=1.0.2.1362; csrf_session_id=316848ac3ce5cd23564f3bd9ac1c5154; ttcid=ab706bb05f53451ab58d1343eaa9ba3834; tt_scid=So..odZMil6aCrLU-HRYMtWqXvm5DEQVB66Zw3F5UmDBVWQliIIIqYgsU6zTrTwi9d2a; ttwid=1%7CHqxoNSFpRIbB4RBU6q23pcKtZnNK2Cf5jliLVUpY-fw%7C1782921784%7C558a4e3fbe98ceab38a786dad95cd6327fb61d881b53392cba1f93b472b59851; odin_tt=ad8ab6344e51f4eb3f3b5e82f2f87095570be9410f1e7b7ce22a71e76be2b7ac811aa82e49038e0ced0515eb26dc8feab65829ac2dc741601eca891f5a89c353; passport_auth_status=048d343001a01a6f59da49846fda2e12%2Cd6e2c055f8c0dfa70548d71bb2caba84; passport_auth_status_ss=048d343001a01a6f59da49846fda2e12%2Cd6e2c055f8c0dfa70548d71bb2caba84; uid_tt=060ad0233972341e848fe4ab648aa39d; uid_tt_ss=060ad0233972341e848fe4ab648aa39d; sid_tt=8a7ba44ab8dd81ba532d19c2be851634; sessionid=8a7ba44ab8dd81ba532d19c2be851634; sessionid_ss=8a7ba44ab8dd81ba532d19c2be851634; ucas_c0_buyin=CkEKBTEuMC4wEKiIiMqKxs6iahi9LyDXl5CAxaz9BiiPETCK8YDZ8K24A0C69JTSBki6qNHUBlCqvJe89pi8ompYfhIUoCG_XuvO5y8lgJPjSYqSj4u7mhs; ucas_c0_ss_buyin=CkEKBTEuMC4wEKiIiMqKxs6iahi9LyDXl5CAxaz9BiiPETCK8YDZ8K24A0C69JTSBki6qNHUBlCqvJe89pi8ompYfhIUoCG_XuvO5y8lgJPjSYqSj4u7mhs; sid_guard=8a7ba44ab8dd81ba532d19c2be851634%7C1782921786%7C5184000%7CSun%2C+30-Aug-2026+16%3A03%3A06+GMT; session_tlb_tag=sttt%7C13%7CinukSrjdgbpTLRnCvoUWNP________-1W4vXGaq7YcGs3kTOnXBgIIm9Kf354WgGoxWIU-NkD8w%3D; sid_ucp_v1=1.0.0-KDJiOTM2NjIxZGRkZWYyYjAyMGQxMzg2MTkzOWZiZTRjYjFiZWFmMjUKGAiK8YDZ8K24AxC69JTSBhiPESAMOAhAJhoCbHEiIDhhN2JhNDRhYjhkZDgxYmE1MzJkMTljMmJlODUxNjM0; ssid_ucp_v1=1.0.0-KDJiOTM2NjIxZGRkZWYyYjAyMGQxMzg2MTkzOWZiZTRjYjFiZWFmMjUKGAiK8YDZ8K24AxC69JTSBhiPESAMOAhAJhoCbHEiIDhhN2JhNDRhYjhkZDgxYmE1MzJkMTljMmJlODUxNjM0; SASID=SID2_7657589840313794857; BUYIN_SASID=SID2_7657589840313794857; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; ecom_us_lt_buyin=0affc65f699cb6381c07a6e633ee30dcee3527b9c5a11adc26c7bb65bf193d54; ecom_us_lt_ss_buyin=0affc65f699cb6381c07a6e633ee30dcee3527b9c5a11adc26c7bb65bf193d54'
     if not cookies:
         print("请输入cookie")
-
+    test()
     # headers = api.JuLiangHeaders(cookie_str=cookies)
     # print(headers)
     # uuid_str = str(uuid.uuid4())
@@ -1553,33 +1589,33 @@ if __name__ == '__main__':
     msToken = ''
     csrf_token = ''
     promotion_id = '3826503724214386695'
-    sku_result = api.getShopSku(promotion_id=promotion_id, cookie_str=cookies, msToken=msToken, csrf_token=csrf_token)
-    sku_result = json.loads(sku_result)
-    params_sku = sku_result['params']
-    sku_result_json = json.loads(sku_result['response'])
-    print("商品sku_response:::", sku_result_json)
-
-    msToken = params_sku['msToken']
-    csrf_token = params_sku['csrf_token']
-
-    print("msToken", msToken)
-    print("csrf_token", csrf_token)
+    # sku_result = api.getShopSku(promotion_id=promotion_id, cookie_str=cookies, msToken=msToken, csrf_token=csrf_token)
+    # sku_result = json.loads(sku_result)
+    # params_sku = sku_result['params']
+    # sku_result_json = json.loads(sku_result['response'])
+    # print("商品sku_response:::", sku_result_json)
+    #
+    # msToken = params_sku['msToken']
+    # csrf_token = params_sku['csrf_token']
+    #
+    # print("msToken", msToken)
+    # print("csrf_token", csrf_token)
 
     # 店铺商品
     # api.getShopList(shop_id='182473628', page=0, cookie_str=cookies, msToken=msToken)
 
     # 商品详情/销量（使用现成API仅支持Windows谷歌浏览器149版本）
-    shop_result = api.JuLiang_ShopInfo(promotion_id=promotion_id, cookie_str=cookies, msToken=msToken, csrf_token=csrf_token)
-    shop_result = json.loads(shop_result)
-    params_shop = shop_result['params']
-    shop_result_json = json.loads(shop_result['response'])
-    print("商品详情response:::", shop_result_json)
-
-    msToken = params_shop['msToken']
-    csrf_token = params_shop['csrf_token']
-
-    print("msToken", msToken)
-    print("csrf_token", csrf_token)
+    # shop_result = api.JuLiang_ShopInfo(promotion_id=promotion_id, cookie_str=cookies, msToken=msToken, csrf_token=csrf_token)
+    # shop_result = json.loads(shop_result)
+    # params_shop = shop_result['params']
+    # shop_result_json = json.loads(shop_result['response'])
+    # print("商品详情response:::", shop_result_json)
+    #
+    # msToken = params_shop['msToken']
+    # csrf_token = params_shop['csrf_token']
+    #
+    # print("msToken", msToken)
+    # print("csrf_token", csrf_token)
 
 
 
