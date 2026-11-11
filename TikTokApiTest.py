@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
+import base64
 import gzip
 import hashlib
 import json
+from pathlib import Path
 import random
 import time
 import re
 from urllib.parse import urlencode, quote
 import requests
 import math
-import douyin_pb2
-from google.protobuf.json_format import ParseDict
 import uuid
+from curl_cffi import requests as tls_requests
 
 
 class TikTokApi:
-    host = 'https://api2.52jan.com'
-    # host = 'http://124.222.92.118:5050'  # 备用
+
+    host = 'http://124.220.179.225:5050'
 
     proxy = {
         'host': 'e688.kdltps.com:15818',
@@ -151,9 +152,10 @@ class TikTokApi:
             't': t,
             'sign': sign
         }
-        resp = requests.post(sign_url, data=data, headers=header).json()
-        print('aBogus:', resp['abogus'], 'aBogus长度:', len(resp['abogus']))
-        return resp
+        resp = requests.post(sign_url, data=data, headers=header)
+        # print('aBogus:', resp['abogus'], 'aBogus长度:', len(resp['abogus']))
+        print('getABogus', resp.text)
+        return resp.json()
 
     def get_web_sign(self, url, referer, ua):
         """
@@ -182,34 +184,306 @@ class TikTokApi:
         print('web_sign', resp)
         return resp
 
-    def get_xgorgon(self, url, cookie, params, ver, headers=None):
+    APP_UA = ('com.ss.android.ugc.aweme/410001 (Linux; U; Android 16; zh_CN; 2407FRK8EC; '
+              'Build/BP2A.250605.031.A3; Cronet/TTNetVersion:f2d9b21f 2026-10-12 '
+              'QuicVersion:636d43af 2026-09-02)')
+
+    # ree-public-key / client-cert / static-sign
+    # 这三项参与 bd-ticket-guard 计算与校验，sec-ts、server-cert-sn 是它们的输入。
+    TICKET_GUARD_HEADERS = {
+        'bd-ticket-guard-ree-public-key': 'BO0vWVQXMxU00vd13ZxYZpIzO+vQ/g8UxQeAhskvfCpUmsBPSrKdi2gQdjgR3LzdImj8dLHCnF52qgUQPFiFmSc=',
+        'passport-sdk-settings': 'x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_2',
+        'passport-sdk-sign': 'x-tt-token,sec_user_id',
+        'bd-ticket-guard-tee-status': '0',
+        'bd-ticket-guard-iteration-version': '2',
+        "ticket_guard_private_key": "0xAA84079218C5004A1240DFAD3660A6CDA8C89D425D319A3AEC3B26A638F5667B",
+        'bd-ticket-guard-client-cert': 'cHViLkJIY1NldWJXb2tob2lEbzlrNVZVZFZUeWs5aTZ4Z2paTUU1UnAyamNDcjE3SVZKUUJWczYrTmp3Y3djMUlxZWZNcWRtdGJzVnNoeDRFZTBmV1lMV2tzYz0=',
+        'bd-ticket-guard-sec-ts': '#wi8I5o4ukHFXKd9PwjLIi72DJeCF5kEQIchWS2oQyCyyAb6fTDbV+ChjDRi6',
+        'x-tt-request-tag': 'n=1;s=-1;p=0'
+    }
+
+    def get_xgorgon(
+            self,
+            url,
+            headers=None,
+            body=None,
+            body_encoding=None,
+            device_token=None,
+            bd_ticket_guard=None,
+            timeout=30
+    ):
+        """调用本地 /dyapi/xgorgon，返回平铺的签名头字典。
+
+        新接口入参：sign、url、body、device_token，可选 bd_ticket_guard /
+        device_token 缺省时取 headers 里的 x-tt-dt。
         """
-        获取x-gorgon
-        :param url:
-        :param cookie:
-        :param params: post提交
-        :param ver: 版本号
-        :param headers:
-        :return:
-        """
-        sign_url = 'http://124.220.179.225:5050/dyapi/xgorgon'
+        sign_url = TikTokApi.host + '/dyapi/xgorgon'
         ts = str(time.time()).split('.')[0]
-        header = {
+        request_headers = {
             'cid': self.cid,
             'timestamp': ts,
-            # 'Content-Type': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'sign': self.set_sign,
+            'url': url,
+            'body': '' if body is None else body,
+            'device_token': str(device_token or (headers or {}).get('x-tt-dt') or ''),
+        }
+        if body_encoding:
+            payload['body_encoding'] = body_encoding
+        if bd_ticket_guard:
+            payload['bd_ticket_guard'] = bd_ticket_guard
+
+        resp = requests.post(sign_url, json=payload, headers=request_headers, timeout=timeout)
+        data = resp.json()
+        if resp.status_code != 200 or 'X-Gorgon' not in data:
+            raise RuntimeError('xgorgon 失败: %s %s' % (resp.status_code, data))
+        print('xgorgon', data)
+        return data
+
+    @staticmethod
+    def parse_comment_stream(body):
+        """解析评论响应：纯 JSON，或 stream 端点的「十六进制长度前缀 + JSON」分帧。
+        与 comment_api_direct.py 的 parse_comment_stream 等价；body 传 HTTP 解压后的字节。
+        """
+        raw = body.lstrip(b'\r\n \t')
+        if raw.startswith(b'{'):
+            document = json.loads(raw)
+            if not isinstance(document, dict):
+                raise ValueError('评论响应不是 JSON 对象')
+            return [document]
+        documents = []
+        position = 0
+        while position < len(raw):
+            while position < len(raw) and raw[position] in (10, 13):
+                position += 1
+            if position == len(raw):
+                break
+            end = raw.find(b'\n', position)
+            if end < 0:
+                raise ValueError('评论分帧长度不完整')
+            size = int(raw[position:end].strip(), 16)
+            position = end + 1
+            if size == 0:
+                break
+            if size < 0 or size > len(raw) - position:
+                raise ValueError('评论分帧负载不完整')
+            document = json.loads(raw[position:position + size])
+            if not isinstance(document, dict):
+                raise ValueError('评论分帧不是 JSON 对象')
+            documents.append(document)
+            position += size
+        if not documents:
+            raise ValueError('评论响应没有可解析的帧')
+        return documents
+
+    @staticmethod
+    def decode_comment_common_data(blob):
+        """解 comment_common_data：base64 → 1.0.0 信封，输出头信息与负载特征。
+
+        值形如 MS4wLjAAAAAA...：解码后前 5 字节是 '1.0.0'，随后 4 字节头，余下是
+        高熵负载（本地没有对应密钥，只给出长度、摘要、hex 前缀与可打印片段）。
+        """
+        if not blob:
+            return None
+        raw = base64.urlsafe_b64decode(str(blob) + '=' * (-len(str(blob)) % 4))
+        payload = raw[9:] if raw[:5] == b'1.0.0' else raw
+        strings = [match.decode('ascii', errors='replace')
+                   for match in re.findall(rb'[ -~]{6,}', payload)[:5]]
+        return {
+            'version': raw[:5].decode('ascii', errors='replace') if raw[:5].isascii() else None,
+            'header_hex': raw[5:9].hex(),
+            'decoded_bytes': len(raw),
+            'payload_bytes': len(payload),
+            'payload_sha256': hashlib.sha256(payload).hexdigest()[:16],
+            'payload_hex': payload[:32].hex(),
+            'strings': strings,
+            'encrypted': raw[:5] == b'1.0.0',
+        }
+
+    def app_comment_list(self, aweme_id, device, cursor=0, count=20, timeout=30):
+        """APP 评论采集：本地签名后直接请求 comment/list。
+
+        device 至少含 device_id / iid，cdid 与 device_token 有就一起带上。
+        """
+        now_ms = int(time.time() * 1000)
+        query = urlencode({
+            'aweme_id': str(aweme_id), 'cursor': str(cursor), 'count': str(count),
+            'item_type': '0', 'insert_ids': '', 'comment_scene': '0', 'page_source': '0',
+            'device_id': str(device['device_id']), 'iid': str(device['iid']),
+            'cdid': str(device.get('cdid', '')), 'aid': '1128', 'app_name': 'aweme',
+            'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
+            'os': 'android', 'ssmix': 'a', 'device_type': '2407FRK8EC', 'device_brand': 'Redmi',
+            'language': 'zh', 'os_api': '36', 'os_version': '16', 'channel': 'xiaomi_1128_64',
+            'manifest_version_code': '410001', 'resolution': '1220*2522', 'dpi': '520',
+            'update_version_code': '41009900', 'package': 'com.ss.android.ugc.aweme',
+            'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'ac': 'wifi',
+            '_rticket': str(now_ms), 'ts': str(now_ms // 1000),
+        })
+        url = 'https://api3-normal-c.amemv.com/aweme/v2/comment/list/?' + query
+        headers = {
+            'user-agent': self.APP_UA,
+            'x-tt-dt': str(device.get('device_token', '')),
+            'x-ss-req-ticket': str(now_ms),
+            'accept-encoding': 'gzip',
+        }
+        headers.update({str(k): str(v) for k, v in self.get_xgorgon(url, headers=headers).items()})
+        response = requests.get(url, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        # 评论接口是 stream：hex 长度前缀 + JSON 分帧，不能直接 .json()。
+        frames = self.parse_comment_stream(response.content)
+        document = {}
+        comments = {}
+        order = []
+        for frame in frames:
+            for comment in frame.get('comments') or []:
+                cid = str(comment.get('cid', ''))
+                if cid and cid not in comments:
+                    order.append(cid)
+                if cid:
+                    comments[cid] = comment
+            document.update({name: value for name, value in frame.items()
+                             if name != 'comments'})
+        if comments:
+            document['comments'] = [comments[cid] for cid in order]
+        document['_frames'] = len(frames)
+        raw_common = document.get('comment_common_data')
+        if raw_common:
+            document['comment_common_data'] = self.decode_comment_common_data(raw_common)
+        return document
+
+    def tt_encrypt(self, plain, seed=None, gz=True, timeout=30):
+        """调用 /dyapi/tt_encrypt：传明文，返回 result(base64)。
+
+        gz=True 返回 base64(TTEncrypt(gzip(明文)))（tt_info 用）；
+        gz=False 返回裸 TTEncrypt 密文的 base64（发码 body 用，解码后发二进制）。
+        """
+        url = TikTokApi.host + '/dyapi/tt_encrypt'
+        ts = str(time.time()).split('.')[0]
+        payload = {'sign': self.set_sign, 'data': plain, 'gzip': gz}
+        if seed:
+            payload['seed'] = seed
+        resp = requests.post(url, json=payload, timeout=timeout, headers={
+            'cid': self.cid, 'timestamp': ts, 'Content-Type': 'application/json'})
+        result = resp.json()
+        if resp.status_code != 200 or not result.get('result'):
+            raise RuntimeError('tt_encrypt 失败: %s %s' % (resp.status_code, result))
+        return result['result']
+
+    def app_send_code(self, phone, device, country_code='+86', timeout=30):
+        """发送验证码：明文写在这里，加密交给 /dyapi/tt_encrypt。
+
+        plain 为原生表单明文（mobile 明文，type=3731 / unbind_exist=35 即 XOR5 结果）；
+        接口返回 {'result': base64}，本方法把该 base64 作为请求体并参与签名。
+        默认 dry-run 只返回待发请求；send=True 才真正 POST。
+        """
+        now_ms = int(time.time() * 1000)
+        plain = (
+            'is_vcd=1&reg_cookie_opt=true&ttnet_sdk_version=4.2.301.15-douyin&auto_read=0'
+            '&auth_sdk_version=4.7.7-rc.48&mix_mode=1&account_app_language=zh&mobile='
+            + quote(country_code + ' ' + str(phone), safe='') +
+            '&language=zh&multi_login=1&type=3731&sec_sdk_version=67765248'
+            '&account_sdk_source=app'
+            '&passport_support_flow=choose_account,captcha,real_name_check,verify'
+            '&unbind_exist=35&verify_sdk_version=4.2.2.cn&is_from_iesaccountsaas=1'
+        )
+        # 发码 body 必须是裸 TTEncrypt 二进制：接口 gzip=False 返回裸密文 base64，解码还原。
+        encoded = self.tt_encrypt(plain, gz=False)
+        raw_body = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4))
+        query = urlencode({
+            'passport-sdk-version': '60763', 'request_from_account_sdk': '1',
+            'is_from_ttaccountsdk': '1', 'klink_egdi': str(device.get('klink_egdi', '')),
+            'iid': str(device['iid']), 'device_id': str(device['device_id']),
+            'ac': 'wifi', 'channel': 'xiaomi_1128_64', 'aid': '1128', 'app_name': 'aweme',
+            'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
+            'os': 'android', 'ssmix': 'a', 'device_type': '2407FRK8EC', 'device_brand': 'Redmi',
+            'language': 'zh', 'os_api': '36', 'os_version': '16', 'manifest_version_code': '410001',
+            'resolution': '1220*2522', 'dpi': '520', 'update_version_code': '41009900',
+            '_rticket': str(now_ms), 'package': 'com.ss.android.ugc.aweme',
+            'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'is_guest_mode': '0',
+            'app_type': 'normal', 'minor_status': '0', 'appTheme': 'light',
+            'is_preinstall': '0', 'need_personal_recommend': '1', 'is_android_pad': '0',
+            'is_android_fold': '0', 'ts': str(now_ms // 1000), 'cdid': str(device.get('cdid', '')),
+        })
+        url = 'https://api5-normal-lq.amemv.com/passport/mobile/send_code/?' + query
+        headers = {
+            'user-agent': self.APP_UA,
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'accept-encoding': 'gzip, deflate, br', 'x-ss-dp': '1128', 'sdk-version': '2',
+            'passport-sdk-version': '60763', 'x-vc-bdturing-sdk-version': '4.2.2.cn',
+            'x-tt-dt': str(device.get('device_token', '')), 'x-ss-req-ticket': str(now_ms),
+            'x-tt-cipher-version': '1.0.0', 'x-tt-encrypt-info': '1',
+            **self.TICKET_GUARD_HEADERS,
+        }
+        # 票据链是会话观测值（本地没有匹配私钥，重算只会得到对不上的密钥），
+        # 直接作为请求头携带即可，不再交给 /xgorgon 回显。
+        signed = self.get_xgorgon(url, body=raw_body.hex(), body_encoding='hex', headers=headers)
+        print(json.dumps(signed, ensure_ascii=False, indent=2))
+        headers.update({str(k): str(v) for k, v in signed.items()})
+        resp = requests.post(url, data=raw_body, headers=headers, timeout=timeout)
+        return resp.text
+
+    def app_play_report(self, video_id, device, cookie=None, impr_id=None, play_ms=0, timeout=30):
+        """播放上报：POST /aweme/v1/aweme/stats/。
+
+        video_id 是作品 ID，进 item_id / pre_item_id / batch_item_ids；
+        impr_id 缺省按当前时间本地生成（真实链路取自推荐流响应的 x-tt-logid）；
+        play_ms 为已播放毫秒，>=15000 时 pre_item_is_finish=1。
+        stats 接口成功时不回响应体（200/204 空 body），所以返回结构化结果而不是 resp.text。
+        """
+        now_ms = int(time.time() * 1000)
+        if impr_id is None:
+            impr_id = time.strftime('%Y%m%d%H%M%S', time.localtime()) + uuid.uuid4().hex[:16].upper()
+        elapsed = max(0, int(play_ms))
+        entry = {
+            'item_id': str(video_id), 'pre_item_id': str(video_id),
+            'pre_impr_id': impr_id, 'request_id': impr_id,
+            'action_time': str(now_ms // 1000), 'pre_item_time': str(elapsed),
+            'pre_item_playtime': str(elapsed), 'pre_item_progress': '0',
+            'pre_item_max_progress': str(elapsed),
+            'pre_item_is_finish': '1' if elapsed >= 15000 else '0',
+            'play_delta': '1', 'video_play_action': '1', 'order': '0',
+            'pre_item_seen': '0', 'traceless_view': '0', 'is_from_ad': '0',
+            'follow_status': '0', 'follower_status': '0', 'aweme_type': '0',
+            'pre_aweme_type': '0', 'is_familiar': '0', 'is_mate': '0',
+            'data_from': '0', 'resp_from': 'sati', 'tab_type': '0',
+            'first_install_time': str(int(time.time()) - 86400),
+        }
+        body = urlencode([
+            ('target_batch_time', '5'),
+            ('batch_time', '5006'),
+            ('batch_stats', json.dumps([entry], ensure_ascii=False, separators=(',', ':'))),
+            ('batch_item_ids', str(video_id)),
+            ('target_batch_count', '3'),
+        ])
+        query = urlencode({
+            'device_id': str(device['device_id']), 'iid': str(device['iid']),
+            'cdid': str(device.get('cdid', '')), 'aid': '1128', 'app_name': 'aweme',
+            'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
+            'os': 'android', 'ssmix': 'a', 'device_type': '2407FRK8EC', 'device_brand': 'Redmi',
+            'language': 'zh', 'os_api': '36', 'os_version': '16', 'channel': 'xiaomi_1128_64',
+            'manifest_version_code': '410001', 'resolution': '1220*2522', 'dpi': '520',
+            'update_version_code': '41009900', 'package': 'com.ss.android.ugc.aweme',
+            'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'ac': 'wifi',
+            '_rticket': str(now_ms), 'ts': str(now_ms // 1000),
+        })
+        url = 'https://aweme.snssdk.com/aweme/v1/aweme/stats/?' + query
+        headers = {
+            'user-agent': self.APP_UA,
+            'x-tt-dt': str(device.get('device_token', '')),
+            'x-ss-req-ticket': str(now_ms),
+            'content-type': 'application/x-www-form-urlencoded',
+            'accept-encoding': 'identity',
+            **self.TICKET_GUARD_HEADERS
 
         }
-        sign = self.set_sign
-        self.array['url'] = url
-        self.array['sign'] = sign
-        self.array['cookie'] = cookie
-        self.array['ver'] = ver
-        self.array['params'] = params
-        self.array['headers'] = json.dumps(headers)
-        resp = requests.post(sign_url, data=self.array, headers=header)
-        print('xgorgon', resp.text)
-        return resp.json()
+        if cookie:
+            headers['cookie'] = cookie
+        signed = self.get_xgorgon(url, body=body, headers=headers)
+        headers.update({str(k): str(v) for k, v in signed.items()})
+        resp = requests.post(url, data=body.encode('utf-8'), headers=headers, timeout=timeout)
+        return resp.text
 
     def get_ApiInfo(self):
         """
@@ -483,7 +757,7 @@ class TikTokApi:
             'pragma': 'no-cache',
             'priority': 'u=1, i',
             'referer': 'https://buyin.jinritemai.com/',
-            'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+            'sec-ch-ua': '"Google Chrome";v="146", "Chromium";v="146", "Not)A;Brand";v="24"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
             'sec-fetch-dest': 'empty',
@@ -491,7 +765,7 @@ class TikTokApi:
             'sec-fetch-site': 'cross-site',
             'sec-fetch-storage-access': 'active',
             'cookie': cookie_str,
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
         }
 
     def JuLiang_BatchLink(self, urls, cookies=None):
@@ -579,7 +853,7 @@ class TikTokApi:
         }
         result = requests.post(url, json=params, headers=headers).json()
         # print("decryptStrData", result)
-        return json.dumps(result.get('result', ''), separators=(',',':'))
+        return result.get('result', '')
 
 
     def get_token(self, cookie_str, biz_id):
@@ -589,33 +863,31 @@ class TikTokApi:
             'cache-control': 'no-cache',
             'pragma': 'no-cache',
             'priority': 'u=1, i',
-            'referer': f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={biz_id}',
-            'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+            'referer': f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={biz_id}&commodity_location=2&id={biz_id}&commodity_location=2&pick_first_source={quote('百应')}&pick_second_source={quote('选品广场')}&pick_third_source=category_recommend&pick_source_id=&recommend_reason_type=&recommend_reason_text=&recall_source=viking_pick_efficient_recalls%3A164%3A-3.56817%2CFIRST%23i2v_search_recalls%3A17%3A-9+%7C+&is_outside_log=1&only_query_params=1&universal_append=1',
+            'sec-ch-ua': '"Google Chrome";v="146", "Chromium";v="146", "Not)A;Brand";v="24"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
             'sec-fetch-dest': 'empty',
             'sec-fetch-mode': 'cors',
             'sec-fetch-site': 'same-origin',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
             'x-secsdk-csrf-request': '1',
             'x-secsdk-csrf-version': '1.2.22',
             'cookie': cookie_str
         }
-        response = requests.head('https://buyin.jinritemai.com/pc/selection/common/btm_mapping', headers=headers)
-        csrf_token = response.headers.get('x-ware-csrf-token')
-        if csrf_token:
-            csrf_token = csrf_token.split(',')[1]
-        return csrf_token
+        response = tls_requests.head('https://buyin.jinritemai.com/pc/selection/common/btm_mapping', headers=headers, impersonate='chrome146')
+        _csrf_token = response.headers.get('x-ware-csrf-token')
+        if _csrf_token:
+            _csrf_token = _csrf_token.split(',')[1]
+        return _csrf_token
 
 
-    def getShopSku(self, promotion_id, cookie_str, msToken=None, csrf_token=None):
+    def getShopSku(self, promotion_id:str, userInfo:dict):
         """
         通过商品ID查询商品规格
         Args:
             promotion_id: 商品ID
-            cookie_str: cookie字符串
-            msToken:
-            csrf_token:
+            userInfo: 登录信息
         Returns:
             商品SKU
         """
@@ -627,39 +899,54 @@ class TikTokApi:
             'content-type': 'application/json',
         }
         sign = self.set_sign
+        user_info = dict(userInfo)
         params = {
             "sign": sign,
             "promotion_id": promotion_id,
-            "cookie": cookie_str,
-            "msToken": msToken,
-            "csrf_token": csrf_token,
+            "userinfo": json.dumps(user_info, ensure_ascii=False, separators=(',',':')),
         }
-        result = requests.post(url, json=params, headers=headers).text
-        print("商品SKU", result)
-        return result
+        response = requests.post(url, json=params, headers=headers, timeout=45)
+        summary = {'http_status': response.status_code}
+        try:
+            result = response.json()
+            if isinstance(result, dict):
+                summary['has_response'] = bool(result.get('response'))
+                error = result.get('error')
+                if isinstance(error, dict):
+                    summary['error'] = {key: error.get(key) for key in
+                                        ('code', 'upstream_status', 'sec_code', 'log_id')}
+        except ValueError:
+            summary['error'] = 'API未返回JSON'
+        print("商品SKU", json.dumps(summary, ensure_ascii=False))
+        return response.text
 
 
-    def getShopList(self, shop_id, page=0, cookie_str='', msToken=''):
+    def getShopList(self, shop_id, _page=0, userInfo: dict=None):
         """根据店铺ID获取店铺商品列表
         Args:
             shop_id: 店铺ID
-            page: 翻页游标
-            cookie_str:
-            msToken:
+            _page: 翻页游标
+            userInfo:
         Returns:
             商品列表
         """
+        if not userInfo:
+            print("请先登录")
+            return
+        cookie_str = userInfo.get('cookie', '')
+        _msToken = userInfo.get('msToken', '')
+
         fp = self.get_cookie_value(cookie_str, 's_v_web_id')
         params = {
             'seraph_did': '',
             'verifyFp': fp,
             'fp': fp,
-            'msToken': msToken,
+            'msToken': _msToken,
         }
 
         body = {
             'scene': 'PCShopDetailFeed',
-            'cursor': page,
+            'cursor': _page,
             'size': 10,
             'extra': {
                 'shop_id': shop_id,
@@ -673,18 +960,16 @@ class TikTokApi:
         a_bogus = self.getABogus(url, ua=headers["user-agent"], data=json_data, t='ju')
         # print(a_bogus)
         url += "&a_bogus=" + a_bogus['abogus']
-        response = requests.post(url, headers=headers, data=json_data).text
+        response = tls_requests.post(url, headers=headers, data=json_data, impersonate='chrome146').text
         print("店铺商品列表", response)
         return response
 
-    def JuLiang_ShopInfo(self, promotion_id, cookie_str='', msToken=None, csrf_token=None, sale: bool = False):
+    def JuLiang_ShopInfo(self, promotion_id, userinfo:dict, sale: bool = False):
         """
         通过商品ID查询商品详情
         Args:
             promotion_id: 商品ID
-            cookie_str:
-            msToken:
-            csrf_token:
+            userinfo: 登录信息
             sale: 是否获取销量，默认否获取商品详情
         Returns:
             商品SKU
@@ -700,9 +985,7 @@ class TikTokApi:
         params = {
             "sign": sign,
             "promotion_id": promotion_id,
-            "cookie": cookie_str,
-            "msToken": msToken,
-            "csrf_token": csrf_token,
+            "userinfo": json.dumps(userinfo, ensure_ascii=False, separators=(',',':')),
             "sale": sale,
         }
         response = requests.post(url, json=params, headers=headers).text
@@ -868,6 +1151,92 @@ class TikTokApi:
         #     print(url)
         return response
 
+    def encode_mobile(self, mobile):
+        url = TikTokApi.host + '/dyapi/mobile'
+        ts = str(time.time()).split('.')[0]
+        header = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        sign = self.set_sign
+        resp = requests.post(url, data={'sign': sign, 'mobile': mobile}, headers=header).json()
+        return resp
+
+
+    def encode_source_info(self, data):
+        url = TikTokApi.host + '/dyapi/web/encode_source_info'
+        ts = str(time.time()).split('.')[0]
+        header = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        sign = self.set_sign
+        resp = requests.post(url, data={'sign': sign, 'data': data}, headers=header).json()
+        return resp
+
+
+    def getVerifyFp(self):
+        url = TikTokApi.host + '/dyapi/web/getVerifyFp'
+        ts = str(time.time()).split('.')[0]
+        header = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        sign = self.set_sign
+        resp = requests.post(url, data={'sign': sign}, headers=header).json()
+        return resp
+
+
+    def fingerprint(
+        self,
+        data:dict=None,
+        uuid_str='',
+        fingerprint_seed=65522,  #修改id变化全套指纹，同个账号必须使用相同id得到同一套指纹
+        referer='https://buyin.jinritemai.com/mpa/account/login?log_out=1&type=24',
+        user_agent=None
+    ):
+        url = TikTokApi.host + '/dyapi/web/fingerprint'
+        ts = str(time.time()).split('.')[0]
+        header = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        if not data:
+            data = {
+                'app': 'fangxingou',
+                'context': {
+                    'ttwid': '',
+                    'seraph_did': '',
+                    'pid': '/mpa/account/login'
+                },
+                '_token': ''
+            }
+        sign = self.set_sign
+        body = {
+            'sign': sign,
+            'data': json.dumps(data, separators=(',',':')),
+            'uuid': uuid_str,
+            'fingerprint_seed': fingerprint_seed,
+            'referer': referer,
+            # 'url': referer,
+            'user_agent': user_agent or '',
+        }
+        resp = tls_requests.post(url, data=body, headers=header, impersonate='chrome146').json()
+        return resp
+
+
+    def encrypt_login_body(self, _token, _data):
+        url = TikTokApi.host + '/dyapi/web/encrypt_login_body'
+        ts = str(time.time()).split('.')[0]
+        header = {
+            'cid': self.cid,
+            'timestamp': ts
+        }
+        sign = self.set_sign
+        resp = requests.post(url, data={'sign': sign, 'token': _token, 'body': _data}, headers=header).json()
+        return resp
+
+
     def get_ac_sign(self, ac_nonce):
         """
         ac_sign
@@ -892,15 +1261,15 @@ class TikTokApi:
         :param video: 视频列表
         :return:
         """
-        url = TikTokApi.host + '/video_info'
+        url = TikTokApi.host + '/dyapi/video_info'
         ts = str(time.time()).split('.')[0]
         header = {
             'cid': self.cid,
             'timestamp': ts
         }
         sign = self.set_sign
-        byte = requests.post(url, data={'video_list': str(video), 'sign': sign}, headers=header).content
-        resp = gzip.decompress(byte).decode('utf-8')
+        resp = requests.post(url, data={'video_list': str(video), 'sign': sign}, headers=header).text
+        # resp = gzip.decompress(byte).decode('utf-8')
         print('视频信息列表:', resp)
         return resp
 
@@ -1418,15 +1787,15 @@ class TikTokApi:
             data['sequence_id'] = high
 
         serialized_data = ''
-        try:
-            result = douyin_pb2.RequestMessage()
-            ParseDict(data, result)
-            serialized_data = result.SerializeToString()
-            print("长度：", len(serialized_data))
-            print("序列化后的二进制数据：", serialized_data)
-            print("hex：", serialized_data.hex())
-        except Exception as e:
-            print(e)
+        # try:
+        #     result = douyin_pb2.RequestMessage()
+        #     ParseDict(data, result)
+        #     serialized_data = result.SerializeToString()
+        #     print("长度：", len(serialized_data))
+        #     print("序列化后的二进制数据：", serialized_data)
+        #     print("hex：", serialized_data.hex())
+        # except Exception as e:
+        #     print(e)
 
         # 开始计算abogus
         uri = "https://imapi.douyin.com/v1/message/send"
@@ -1444,28 +1813,352 @@ class TikTokApi:
         # print("sendMessage:", response.text)
 
 
+    def getSku2(self, product_id:str, douyinUserinfo:dict) -> dict:
+        # 登录抖音网页版替换cookie、uifid、fp、mstoken、verifyFp
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'zh-CN,zh;q=0.9',
+            'cache-control': 'no-cache',
+            'content-type': 'application/json',
+            'origin': 'https://www.douyin.com',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': 'https://www.douyin.com/?recommend=1',
+            'sec-ch-ua': '"Google Chrome";v="146", "Chromium";v="146", "Not)A;Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'uifid': douyinUserinfo['uifid'],
+            'user-agent': douyinUserinfo['user-agent'],
+            'x-secsdk-csrf-token': 'DOWNGRADE',
+            'cookie': douyinUserinfo['cookie'],
+        }
+
+        params = [
+            ('device_platform', 'webapp'),
+            ('aid', '6383'),
+            ('channel', 'channel_pc_web'),
+            ('app_name', 'aweme'),
+            ('webid', douyinUserinfo['webid']),
+            ('user_agent', douyinUserinfo['user-agent']),
+            ('fp', douyinUserinfo['fp']),
+            ('did', '0'),
+            ('referer', ''),
+            ('target', ''),
+            ('pc_client_type', '1'),
+            ('pc_libra_divert', 'Windows'),
+            ('update_version_code', '170400'),
+            ('support_h265', '1'),
+            ('support_dash', '1'),
+            ('version_code', '170400'),
+            ('version_name', '17.4.0'),
+            ('cookie_enabled', 'true'),
+            ('screen_width', '1707'),
+            ('screen_height', '1067'),
+            ('browser_language', 'zh-CN'),
+            ('browser_platform', 'Win32'),
+            ('browser_name', 'Chrome'),
+            ('browser_version', '149.0.0.0'),
+            ('browser_online', 'true'),
+            ('engine_name', 'Blink'),
+            ('engine_version', '149.0.0.0'),
+            ('os_name', 'macOS'),
+            ('os_version', '10'),
+            ('cpu_core_num', '32'),
+            ('device_memory', '16'),
+            ('platform', 'PC'),
+            ('downlink', '10'),
+            ('effective_type', '4g'),
+            ('round_trip_time', '50'),
+            ('uifid', douyinUserinfo['uifid']),
+            ('verifyFp', douyinUserinfo['fp']),
+            ('fp', douyinUserinfo['fp']),
+            ('msToken', douyinUserinfo['msToken']),
+        ]
+
+        json_data = {
+            'author_id': '0',
+            'product_id': product_id,
+        }
+
+        url = f'https://www.douyin.com/aweme/v1/web/ecom/product/sku/list/?{urlencode(params)}'
+        data = json.dumps(json_data, separators=(',', ':'))
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], data=data, t='ju')
+        url += "&a_bogus=" + a_bogus['abogus']
+        # print(url)
+
+        response = tls_requests.post(
+            url,
+            headers=headers,
+            data=data,
+            impersonate='chrome146'
+        )
+        print("getSku2", response.text)
+        return response.json()
+
+
+
+    def getSkuPrice(self, product_id:str, skus:list[str], douyinUserinfo:dict):
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'zh-CN,zh;q=0.9',
+            'cache-control': 'no-cache',
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'origin': 'https://www.douyin.com',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': 'https://www.douyin.com/?recommend=1',
+            'sec-ch-ua': '"Google Chrome";v="146", "Chromium";v="146", "Not)A;Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'uifid': douyinUserinfo['uifid'],
+            'user-agent': douyinUserinfo['user-agent'],
+            'x-secsdk-csrf-token': 'DOWNGRADE',
+            'cookie': douyinUserinfo['cookie'],
+        }
+
+        params = [
+            ('device_platform', 'webapp'),
+            ('aid', '6383'),
+            ('channel', 'channel_pc_web'),
+            ('app_name', 'aweme'),
+            ('webid', douyinUserinfo['webid']),
+            ('user_agent', douyinUserinfo['user-agent']),
+            ('fp', douyinUserinfo['fp']),
+            ('did', '0'),
+            ('referer', ''),
+            ('target', ''),
+            ('pc_client_type', '1'),
+            ('pc_libra_divert', 'Windows'),
+            ('update_version_code', '170400'),
+            ('support_h265', '1'),
+            ('support_dash', '1'),
+            ('version_code', '170400'),
+            ('version_name', '17.4.0'),
+            ('cookie_enabled', 'true'),
+            ('screen_width', '1707'),
+            ('screen_height', '1067'),
+            ('browser_language', 'zh-CN'),
+            ('browser_platform', 'Win32'),
+            ('browser_name', 'Chrome'),
+            ('browser_version', '149.0.0.0'),
+            ('browser_online', 'true'),
+            ('engine_name', 'Blink'),
+            ('engine_version', '149.0.0.0'),
+            ('os_name', 'Windows'),
+            ('os_version', '10'),
+            ('cpu_core_num', '32'),
+            ('device_memory', '16'),
+            ('platform', 'PC'),
+            ('downlink', '10'),
+            ('effective_type', '4g'),
+            ('round_trip_time', '50'),
+            ('uifid', douyinUserinfo['uifid']),
+            ('verifyFp', douyinUserinfo['fp']),
+            ('fp', douyinUserinfo['fp']),
+            ('msToken', douyinUserinfo['msToken']),
+        ]
+
+        sku_ids = []
+        # content_id是视频ID
+        videoId = '7633454865993256234'
+        for sku in skus:
+            sku_ids.append(
+                {'specify_sku_id': sku, 'specify_sku_num': 1, 'specify_activity_id': '0',
+                 'guide_trade_transmit_info': '{"log_id":""}', 'product_id': product_id,
+                 'sku_id': sku, 'sku_num': 1, 'content_id': videoId,
+                 'promotion_id': product_id, 'origin_id': f'{videoId}_{product_id}',
+                 'origin_type': '3002001000', 'new_source_type': 'product_detail',
+                 'buyin_track': '', 'extra': '{}'}
+            )
+        data_str = {'first_enter': True, 'shape': 0, 'forbid_redpack': True, 'support_redpack': False, 'use_marketing_combo': False, 'auto_select_best_coupons': True, 'auto_apply_coupon': 1, 'cj_sdk': '', 'source_type': '1', 'marketing_channel': '', 'entrance_params': '', 'shop_requests': [{'shop_id': 'FfFhpbIP', 'product_requests': sku_ids}]}
+        json_data =  {
+            'json_form': json.dumps(data_str, separators=(',',':'), ensure_ascii=False),
+        }
+        data = f'json_form={quote(json_data['json_form'])}'
+        url = f'https://www.douyin.com/aweme/v1/web/ecom/order/confirm/?{urlencode(params)}'
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], data=data)
+        url += "&a_bogus=" + a_bogus['abogus']
+        response = tls_requests.post(url, headers=headers, data=data, impersonate='chrome146')
+        print("response", response.text)
+        return response.json()
+
+
+    def _ShopSku(self, biz_id, userinfo: dict) -> dict:
+        """
+        通过商品ID查询商品规格
+        Args:
+            biz_id: 商品ID
+        Returns:
+            商品SKU
+        """
+        from logindemo_ju import getEWID, api
+        _cookie = userinfo.get('cookie', '')
+        _msToken = userinfo.get('msToken', '')
+
+        headers = self.JuLiangHeaders(_cookie)
+        headers['content-type'] = 'application/json'
+        headers['referer'] = f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={biz_id}&commodity_location=2&id={biz_id}&commodity_location=2&pick_first_source={quote('百应')}&pick_second_source={quote('选品广场')}&pick_third_source=category_recommend&pick_source_id=&recommend_reason_type=&recommend_reason_text=&recall_source=viking_pick_efficient_recalls%3A164%3A-3.56817%2CFIRST%23i2v_search_recalls%3A17%3A-9+%7C+&is_outside_log=1&only_query_params=1&universal_append=1'
+        uuid_str = str(uuid.uuid4())
+        _msToken = api().getMsToken(_cookie, _msToken, uuid_str)
+        userinfo['msToken'] = _msToken
+        ewid = getEWID(_msToken, userinfo, False, referer=headers['referer'])
+        userinfo['ewid'] = ewid
+        fp = self.get_cookie_value(_cookie, 's_v_web_id') or ''
+
+        params = {
+            'ewid': ewid,
+            # 'seraph_did': '',
+            'verifyFp': fp,
+            'fp': fp,
+            'msToken': _msToken,
+        }
+
+        body = {
+            "scene_info":{"request_page":2},
+            "other_params":{"colonel_activity_id":""},
+            "biz_id":str(biz_id),
+            "biz_id_type":2,
+            "enter_from":"pc.selection_square.recommend_main",
+            "data_module":"dynamic",
+            "dynamic_params":{"param_type":6},
+            "extra":{}
+        }
+
+        json_data = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+        headers['content-type'] = 'application/json'
+        url = f'https://buyin.jinritemai.com/pc/selection/decision/pack_detail?{urlencode(params)}'
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], data=json_data, t='ju')
+        url += "&a_bogus=" + a_bogus['abogus']
+        _csrf_token = self.get_token(biz_id=biz_id, cookie_str=_cookie)
+        headers['x-secsdk-csrf-token'] = _csrf_token
+        print("x-secsdk-csrf-token", _csrf_token)
+        response = tls_requests.post(
+            url,
+            headers=headers,
+            data=json_data,
+            impersonate='chrome146',
+
+        ).content
+        print("sku", response.decode('utf-8'))
+
+        result = {
+            "response": response.decode('utf-8'),
+            "params": userinfo
+        }
+        return result
+
+    def _ShopInfo(self, biz_id, userinfo, sale: bool = False):
+        """
+        通过商品ID查询商品详情
+        Args:
+            biz_id: 商品ID
+            sale: 是否获取销量，默认否
+        Returns:
+            商品详情
+        """
+        from  logindemo_ju import getEWID, api
+        _cookie = userinfo.get('cookie', '')
+        _msToken = userinfo.get('msToken', '')
+        headers = self.JuLiangHeaders(cookie_str=_cookie)
+        headers['content-type'] = 'application/json'
+        headers['referer'] = f'https://buyin.jinritemai.com/dashboard/merch-picking-library/merch-promoting?commodity_id={biz_id}&commodity_location=1&id={biz_id}'
+        uuid_str = str(uuid.uuid4())
+
+        _msToken = api().getMsToken(_cookie, _msToken, uuid_str)
+        userinfo['msToken'] = _msToken
+        ewid = getEWID(_msToken, userinfo, False)
+        userinfo['ewid'] = ewid
+        fp = self.get_cookie_value(_cookie, 's_v_web_id') or ''
+        params = {
+            'ewid': ewid,
+            'seraph_did': '',
+            'verifyFp': fp,
+            'fp': fp,
+            'msToken': _msToken,
+        }
+
+        body = {
+            'scene_info': {
+                'request_page': 2,
+            },
+            'other_params': {
+                'colonel_activity_id': '',
+            },
+            'biz_id': biz_id,
+            'biz_id_type': 2,
+            'enter_from': 'pc.selection_square.recommend_main',
+            'data_module': 'core',
+            'extra': {},
+        }
+        if sale:
+            body = {
+                'scene_info': {
+                    'request_page': 2,
+                },
+                'biz_id': biz_id,
+                'biz_id_type': 2,
+                'enter_from': 'pc.selection_square.recommend_main',
+                'data_module': 'pc-non-core',
+                'extra': {
+                    'use_kol_product': '1',
+                },
+            }
+
+        json_data = json.dumps(body, separators=(',', ':'))
+        url = f'https://buyin.jinritemai.com/pc/selection/decision/pack_detail?{urlencode(params)}'
+        a_bogus = self.getABogus(url, ua=headers["user-agent"], data=json_data, t='ju')
+        url += "&a_bogus=" + a_bogus['abogus']
+        headers['content-type'] = 'application/json'
+        response = tls_requests.post(
+            url,
+            headers=headers,
+            data=json_data,
+            impersonate='chrome146'
+        ).text
+
+        result = {
+            "response": response,
+            "params": userinfo,
+        }
+        # print("商品详情", response.text)
+        return result
 
 def test():
+    # 使用146版本userAgent
+    # pip install curl_cffi
+    # uv add curl_cffi 或 uv pip install curl_cffi
+
     _page = 0
-    _msToken = ''
-    _csrf_token = ''
-    result = api.getShopList(shop_id='182473628', page=_page, cookie_str=cookies, msToken=_msToken)
+    userinfo = {
+      "web_id": "",
+      "user_id": "",
+      "shop_id": "",
+      "account_id": "",
+      "cookie": "passport_csrf_token=cf83d8d43ccd3831ace5f62d71f69608; passport_csrf_token_default=cf83d8d43ccd3831ace5f62d71f69608; s_v_web_id=verify_mraohhuw_Hw0l9foO_3jOq_4srC_AEdi_z62hnMk2n4EE; is_staff_user=false; has_biz_token=false; _tea_utm_cache_3813=undefined; scmVer=1.0.2.1533; _tea_utm_cache_2631=undefined; MONITOR_WEB_ID=72b54189-035a-4141-ba62-50a23a1dce2e; ttcid=e2be7ab2795547da8c2f823c767ac46842; gfkadpd=2631,22740; csrf_session_id=13fe801e209ba5f181111ca7dd64e5b4; biz_trace_id=118b281d; __security_mc_1_s_sdk_crypt_sdk=fc3acb33-4442-b1f7; bd_ticket_guard_client_data=eyJiZC10aWNrZXQtZ3VhcmQtdmVyc2lvbiI6MiwiYmQtdGlja2V0LWd1YXJkLWl0ZXJhdGlvbi12ZXJzaW9uIjoxLCJiZC10aWNrZXQtZ3VhcmQtcmVlLXB1YmxpYy1rZXkiOiJCSjN0L0dvdkdicmtYUFdIMVlqcDVEWkZMdzRmTW1DQS9RamxmZzhYUEx5VFRFR1o3RDA2QUk2ZXJmV2JpbDdrYUFhZnRWY3RuTWl0RE55ZnhPM2NWdDA9IiwiYmQtdGlja2V0LWd1YXJkLXdlYi12ZXJzaW9uIjoyfQ%3D%3D; bd_ticket_guard_client_web_domain=2; ttwid=1%7CcLIFqeNgwcOPwGKobamb31-5Lv8s_uHBYy6iz27jFSE%7C1784635022%7C4a78d370339540e423015455b24fc88912c2ea92ee7b8fb7457d5e4c5fa52893; odin_tt=fdaf6dce92b7df11a421482ef1e800c6d1b6d01f6405b734628fc81c6d8da4704b3b78c24cf74fd7c0ca780039aeefd864882f79294d847e116e62757f5c15bc; passport_auth_status=26085d18a1d829d98e2038c5f6ea49f6%2C1fd50bf35107a4836a7314be3731b1c8; passport_auth_status_ss=26085d18a1d829d98e2038c5f6ea49f6%2C1fd50bf35107a4836a7314be3731b1c8; uid_tt=c846e84394fa84621929bd7668b23646; uid_tt_ss=c846e84394fa84621929bd7668b23646; sid_tt=42bb116b581495f5817382a4178e2729; sessionid=42bb116b581495f5817382a4178e2729; sessionid_ss=42bb116b581495f5817382a4178e2729; ucas_c0_buyin=CkEKBTEuMC4wEK6IhoSo0devahi9LyD7mODf2KztByiPETC6xPC5w6zdBECQvf3SBkiQ8bnVBlCbvKOo6L2qrGpYfhIUqrYbmML3BVo--sIjzlNCSHSD4Js; ucas_c0_ss_buyin=CkEKBTEuMC4wEK6IhoSo0devahi9LyD7mODf2KztByiPETC6xPC5w6zdBECQvf3SBkiQ8bnVBlCbvKOo6L2qrGpYfhIUqrYbmML3BVo--sIjzlNCSHSD4Js; sid_guard=42bb116b581495f5817382a4178e2729%7C1784635024%7C5184000%7CSat%2C+19-Sep-2026+11%3A57%3A04+GMT; session_tlb_tag=sttt%7C3%7CQrsRa1gUlfWBc4KkF44nKf_________egV5pMpCvNMiIaduCwoIGN-bJy4cw5U44h7iOdAMaGu8%3D; sid_ucp_v1=1.0.0-KDVmN2IzYmJhNDBlYTcyODg3MmE2NDdiOGU2OTMwOTRjNjA3ZGZhNmIKGgi6xPC5w6zdBBCQvf3SBhiPESAMOAhAJkgEGgJsZiIgNDJiYjExNmI1ODE0OTVmNTgxNzM4MmE0MTc4ZTI3Mjk; ssid_ucp_v1=1.0.0-KDVmN2IzYmJhNDBlYTcyODg3MmE2NDdiOGU2OTMwOTRjNjA3ZGZhNmIKGgi6xPC5w6zdBBCQvf3SBhiPESAMOAhAJkgEGgJsZiIgNDJiYjExNmI1ODE0OTVmNTgxNzM4MmE0MTc4ZTI3Mjk; SASID=SID2_7664948244137296180; BUYIN_SASID=SID2_7664948244137296180; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; ecom_us_lt_buyin_top=10931bac0c31a37abc2bab2cdc2209384248d605e06fb9011bf14e91a43c92c0; ecom_us_lt_ss_buyin_top=10931bac0c31a37abc2bab2cdc2209384248d605e06fb9011bf14e91a43c92c0; ecom_us_lt_buyin=10931bac0c31a37abc2bab2cdc2209384248d605e06fb9011bf14e91a43c92c0; ecom_us_lt_ss_buyin=10931bac0c31a37abc2bab2cdc2209384248d605e06fb9011bf14e91a43c92c0; tt_scid=EWD3pBeqKSPJi5YFJi4VJ-tvVsAp5RfGISzQp7IRPRMn-NJDXWVjTtiC43rGMmjl5f78"
+    }
+    _msToken = userinfo.get('msToken', '')
+
+    result = api.getShopList(shop_id='182473628', _page=_page, userInfo=userinfo)
     json_data = json.loads(result)
-    print(json_data)
     for data in json_data['data']['summary_promotions']:
         _promotion_id = data['promotion_id']
         _product_id = data['product_id']
-        sku_result = api.getShopSku(promotion_id=_promotion_id, cookie_str=cookies, msToken=_msToken, csrf_token=_csrf_token)
-        sku_result = json.loads(sku_result)
+        sku_result = api._ShopSku(_promotion_id, userinfo)
+        sku_result = sku_result
+        print("商品sku_response:::", sku_result['response'])
         params_sku = sku_result['params']
         if '登录' in sku_result['response']:
             print("请重新登录")
             break
         sku_result_json = json.loads(sku_result['response'])
-        # print("商品sku_response:::", sku_result_json)
-        # 复用msToken,csrf_token
-        _msToken = params_sku['msToken']
-        _msToken = params_sku['csrf_token']
+        # 复用msToken
+        userinfo['msToken'] = params_sku['msToken']
         for item_sku in sku_result_json['data']['model']['sku_panel_data']['skus_spec_component']['sku_specs_list']:
             print(item_sku)
 
@@ -1474,19 +2167,127 @@ def test():
 
 
 
+def test2():
+    """一键获取店铺下所有商品sku信息"""
+    userinfo = {
+        "web_id": "",
+        "user_id": "",
+        "account_id": "",
+        "msToken": "",
+        "ewid": "",
+        "cookie": "passport_csrf_token=c9e855f51e79183ff2d8623324d9253f; passport_csrf_token_default=c9e855f51e79183ff2d8623324d9253f; s_v_web_id=verify_mr5qc4ev_HDXChxEE_iNIX_4BLc_88Cz_u7jUqRF8iNYx; ttwid=1%7CEPynzswc9Te4XDLNPrFK9iIGj631SsaC4BzwWy5e73M%7C1783131309%7C9311634cee3c145127d96f361f629daa5de83d3fba903d30103569ea159103da; odin_tt=99021cb49270b40d1fb67465e27ad046534c90bd887c17fe2604777db357fb5e2061e072209d1ec1ae77d984d259aef671b4c6cc14379a4dfb021597cea49ca2; n_mh_daren=3_BiiUhKy3sgJX1q8p82m1zXXLISgjhbg5b4xQ_MIRA; passport_auth_status_daren=5d07be3bef03de43077e482c127c5d67%2C; passport_auth_status_ss_daren=5d07be3bef03de43077e482c127c5d67%2C; sso_uid_tt_daren=d9959703b58efe0076c43358be6cfe8d; sso_uid_tt_ss_daren=d9959703b58efe0076c43358be6cfe8d; toutiao_sso_user_daren=8dfb96b13e5a91df1885c35c524e0e4c; toutiao_sso_user_ss_daren=8dfb96b13e5a91df1885c35c524e0e4c; sid_ucp_sso_v1_daren=1.0.0-KDkyMzc4NzM1NWNlODExMjkyNDA3YTFhNzM5YzI5MzBlZjQ3NzI4OGIKHgips8C6x6zxBxCu2aHSBhiPESAMMNTqndIGOAhAJhoCbHEiIDhkZmI5NmIxM2U1YTkxZGYxODg1YzM1YzUyNGUwZTRj; ssid_ucp_sso_v1_daren=1.0.0-KDkyMzc4NzM1NWNlODExMjkyNDA3YTFhNzM5YzI5MzBlZjQ3NzI4OGIKHgips8C6x6zxBxCu2aHSBhiPESAMMNTqndIGOAhAJhoCbHEiIDhkZmI5NmIxM2U1YTkxZGYxODg1YzM1YzUyNGUwZTRj; passport_auth_status=375d9127a662da32b12e171b3cdf4fcf%2C; passport_auth_status_ss=375d9127a662da32b12e171b3cdf4fcf%2C; sid_guard=b9ec120cc1c05317eae314e4114d6dba%7C1783131313%7C5183999%7CWed%2C+02-Sep-2026+02%3A15%3A12+GMT; uid_tt=3253cd6ffeaa7bb6a8be9e55fa213712; uid_tt_ss=3253cd6ffeaa7bb6a8be9e55fa213712; sid_tt=b9ec120cc1c05317eae314e4114d6dba; sessionid=b9ec120cc1c05317eae314e4114d6dba; sessionid_ss=b9ec120cc1c05317eae314e4114d6dba; session_tlb_tag=sttt%7C3%7CuewSDMHAUxfq4xTkEU1tuv_________E2xFNspItHaHSH2UTShbxQ-DpPoEBSEQojJ2kErklgCA%3D; is_staff_user=false; has_biz_token=false; sid_ucp_v1=1.0.0-KDkzMDVhZTgxMzc3ZDdhNTJkOWM0NDYxMzc2ZTlhYzJkMGI5YTg4ODgKGAips8C6x6zxBxCx2aHSBhiPESAMOAhAJhoCbGYiIGI5ZWMxMjBjYzFjMDUzMTdlYWUzMTRlNDExNGQ2ZGJh; ssid_ucp_v1=1.0.0-KDkzMDVhZTgxMzc3ZDdhNTJkOWM0NDYxMzc2ZTlhYzJkMGI5YTg4ODgKGAips8C6x6zxBxCx2aHSBhiPESAMOAhAJhoCbGYiIGI5ZWMxMjBjYzFjMDUzMTdlYWUzMTRlNDExNGQ2ZGJh; ucas_sso_c0_daren=CkEKBTEuMC4wELaIkaq3lZukahi9LyC655DBx6zJAyiPETCps8C6x6zxB0Cw2aHSBkiwjd7UBlCzvIiYvoeSpGpYfhIUzrpp3U-neXc-uXl_q6rrIHWOUnQ; ucas_sso_c0_ss_daren=CkEKBTEuMC4wELaIkaq3lZukahi9LyC655DBx6zJAyiPETCps8C6x6zxB0Cw2aHSBkiwjd7UBlCzvIiYvoeSpGpYfhIUzrpp3U-neXc-uXl_q6rrIHWOUnQ; ucas_c0_buyin=CkEKBTEuMC4wEImIjuzQlZukahi9LyC655DBx6zJAyiPETCps8C6x6zxB0Cw2aHSBkiwjd7UBlCzvIiYvoeSpGpYfhIUzbOW5nVIz0jzddBybzDdz3X88-4; ucas_c0_ss_buyin=CkEKBTEuMC4wEImIjuzQlZukahi9LyC655DBx6zJAyiPETCps8C6x6zxB0Cw2aHSBkiwjd7UBlCzvIiYvoeSpGpYfhIUzbOW5nVIz0jzddBybzDdz3X88-4; SASID=SID2_7658489606759563556; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; ecom_us_lt_buyin=bccf50782b1750d866af3e2a9a8109dd9d78fa2cf5ddce0779aa66eeb3ee3fa8; ecom_us_lt_ss_buyin=bccf50782b1750d866af3e2a9a8109dd9d78fa2cf5ddce0779aa66eeb3ee3fa8; BUYIN_SASID=SID2_7658489606759563556; ecom_us_lt_buyin_top=bccf50782b1750d866af3e2a9a8109dd9d78fa2cf5ddce0779aa66eeb3ee3fa8; ecom_us_lt_ss_buyin_top=bccf50782b1750d866af3e2a9a8109dd9d78fa2cf5ddce0779aa66eeb3ee3fa8;"
+    }
+    _page = 0
+    _msToken = userinfo.get('msToken', '')
+    result = api.getShopList(shop_id='182473628', page=_page, cookie_str=cookies, msToken=_msToken)
+    dy_cookie = 'download_guide=%223%2F20260706%2F0%22; enter_pc_once=1; UIFID_TEMP=4f370c6d8fb718a382d31de50859ac71a63e1a5cc19a7a2de24e63803f467b413cabe378bcd6a6b159f4cccdf1df13310a250c128401629d52ae70efcb1414d8d95553b2f0fd844d9036b152d534dbd04ae5fb4992f1ed2ef0b0ac23b3699946b9bbfb8419897af74df03856c2723862; s_v_web_id=verify_mr81ywt2_olsxOosT_wDqW_4K70_8sab_0oYITF9ehQKR; dy_swidth=1707; dy_sheight=1067; hevc_supported=true; fpk1=U2FsdGVkX184wO9Pnvw1ndv3QaEHhd/kEN+Mkg5X5AgK+VtQYhO6YNuBHkHUCwOBzMlruYcR2hrUC1QdJNgQ4A==; fpk2=16fee37559dbd42b448204446d02089f; strategyABtestKey=%221783271776.336%22; passport_csrf_token=aecfc173c726d3d3a03292ef97ad77bb; passport_csrf_token_default=aecfc173c726d3d3a03292ef97ad77bb; bd_ticket_guard_client_web_domain=2; passport_assist_user=CkE_Z3ofToG1QAPoaEUkyMizufv6kH1S8w9LDWT41aYD-V0Bu1mJrxPg9o2yk-DlYqbfwxakFIq9Hn4wmUcVz48pIRpKCjwAAAAAAAAAAAAAUJ8dacd0MZo52vvREs6ysh2kOQYp-O7XY5tf7EkF_OdiNbS5pit1iYt474TKr34hUfYQoYOWDhiJr9ZUIAEiAQMDdY9l; n_mh=EyEgyFxFI5fiy-d_iT660NAbFEw22sfOXLkhKXhtwCs; sid_guard=c19554a5d142d2ac4746ca410d9ec0e3%7C1783271786%7C5184000%7CThu%2C+03-Sep-2026+17%3A16%3A26+GMT; uid_tt=eba75b5a7eec62e0401569abbce0981b; uid_tt_ss=eba75b5a7eec62e0401569abbce0981b; sid_tt=c19554a5d142d2ac4746ca410d9ec0e3; sessionid=c19554a5d142d2ac4746ca410d9ec0e3; sessionid_ss=c19554a5d142d2ac4746ca410d9ec0e3; session_tlb_tag=sttt%7C14%7CwZVUpdFC0qxHRspBDZ7A4__________YTdyD1AuufETbe47iZ4Uhstpf3pzyhqLLrD0n9vlu4zE%3D; is_staff_user=false; has_biz_token=false; sid_ucp_v1=1.0.0-KDc4ZDJlODg1NTIwMGQzMGNiNDgxYTQyNjdmM2UyZDAzNWRlZDJlZTAKIQj4ueCXiPTvAhDqoqrSBhjvMSAMMK3goPgFOAdA9AdIBBoCbHEiIGMxOTU1NGE1ZDE0MmQyYWM0NzQ2Y2E0MTBkOWVjMGUz; ssid_ucp_v1=1.0.0-KDc4ZDJlODg1NTIwMGQzMGNiNDgxYTQyNjdmM2UyZDAzNWRlZDJlZTAKIQj4ueCXiPTvAhDqoqrSBhjvMSAMMK3goPgFOAdA9AdIBBoCbHEiIGMxOTU1NGE1ZDE0MmQyYWM0NzQ2Y2E0MTBkOWVjMGUz; _bd_ticket_crypt_cookie=626e4312c1c40472566e59dd7409c3ef; __security_mc_1_s_sdk_sign_data_key_web_protect=34eef148-4d5f-bc50; __security_mc_1_s_sdk_cert_key=2da47526-4c83-b83e; __security_mc_1_s_sdk_crypt_sdk=58e87c28-45fb-84c2; __security_server_data_status=1; login_time=1783271785497; publish_badge_show_info=%220%2C0%2C0%2C1783271785927%22; DiscoverFeedExposedAd=%7B%7D; SelfTabRedDotControl=%5B%7B%22id%22%3A%227074567551921719304%22%2C%22u%22%3A202%2C%22c%22%3A0%7D%5D; UIFID=4f370c6d8fb718a382d31de50859ac71a63e1a5cc19a7a2de24e63803f467b413cabe378bcd6a6b159f4cccdf1df13310a250c128401629d52ae70efcb1414d8626c33bda95993e10afb3985a5795daab90d29a65f3bde86e63d86320f044162f69403a902b1f333c2657270bb92f232dd8318e4f3941a45120576d4706cc64fa0c2d3012df1bf9b7bf3259019d3787aaf892744bf5af0c592bcefc37f3fda18dcaa97797da8594b4c7fdea5e9c87847532665e444d6b9035212e822f916b067; ttwid=1%7CNMrtUFz2nQaW-Fi04DzK2GiNNdR5wFLZL7fctI_aRDk%7C1783271790%7Cbe59bec128862f9b50ac6cab384fe76ed0593aef79c4bf8e615e70109f51059f; is_dash_user=1; volume_info=%7B%22isUserMute%22%3Afalse%2C%22isMute%22%3Afalse%2C%22volume%22%3A0.5%7D; playRecommendGuideTagCount=1; totalRecommendGuideTagCount=1; __ac_signature=_02B4Z6wo00f010rG8TAAAIDAx25IuHOwWCtK5vWAALkG04; FOLLOW_NUMBER_YELLOW_POINT_INFO=%22MS4wLjABAAAAQ5zADansJK87lob69mserrY7ZF5taykVB1paHgO8APhx7dFs_YDkbWhVFf2dznp9%2F1783353600000%2F0%2F1783272683031%2F0%22; douyin.com; device_web_cpu_core=32; device_web_memory_size=16; architecture=amd64; is_support_rtm_web_ts=1; stream_recommend_feed_params=%22%7B%5C%22cookie_enabled%5C%22%3Atrue%2C%5C%22screen_width%5C%22%3A1707%2C%5C%22screen_height%5C%22%3A1067%2C%5C%22browser_online%5C%22%3Atrue%2C%5C%22cpu_core_num%5C%22%3A32%2C%5C%22device_memory%5C%22%3A16%2C%5C%22downlink%5C%22%3A1.5%2C%5C%22effective_type%5C%22%3A%5C%224g%5C%22%2C%5C%22round_trip_time%5C%22%3A50%7D%22; FOLLOW_LIVE_POINT_INFO=%22MS4wLjABAAAAQ5zADansJK87lob69mserrY7ZF5taykVB1paHgO8APhx7dFs_YDkbWhVFf2dznp9%2F1783353600000%2F0%2F1783345962556%2F0%22; bd_ticket_guard_client_data=eyJiZC10aWNrZXQtZ3VhcmQtdmVyc2lvbiI6MiwiYmQtdGlja2V0LWd1YXJkLWl0ZXJhdGlvbi12ZXJzaW9uIjoxLCJiZC10aWNrZXQtZ3VhcmQtcmVlLXB1YmxpYy1rZXkiOiJCSERYRmw4YnFKcTJrWDRUMnRyNGVESWpUajh2cERPdk5nb0gzK3FhU0N3M1JyS0FSNWMxcG5QU1RheDF5UEZLV05PTmJUaUJreUVjUjNVYTR3QU5BZjg9IiwiYmQtdGlja2V0LWd1YXJkLXdlYi12ZXJzaW9uIjoyfQ%3D%3D; home_can_add_dy_2_desktop=%221%22; biz_trace_id=cada1da9; sdk_source_info=7e276470716a68645a606960273f276364697660272927676c715a6d6069756077273f276364697660272927666d776a68605a607d71606b766c6a6b5a7666776c7571273f275e58272927666a6b766a69605a696c6061273f27636469766027292762696a6764695a7364776c6467696076273f275e582729277672715a646971273f2763646976602729277f6b5a666475273f2763646976602729276d6a6e5a6b6a716c273f2763646976602729276c6b6f5a7f6367273f27636469766027292771273f2733343135323c303136363d3234272927676c715a75776a716a666a69273f2763646976602778; bit_env=WhnRlRnOvbwKhMpgRjAV9xpOcxxn1XY86-YD7eiZnnIqKO_AAIU3VZxek6SfP1Hw2E02ga3mKloPO51SHiHZNNZ4RVj7Lp3XuAaI0iE5v0DtSXNl_ngmR3eXTznfxzRkq_jTQ7osXUFSFPdjpjVJ-ojGVnytAiWogDeGgUPpNUrD-xsz5PXRSAyAf_a39qoev2GbI0W5OVII1cgLu2WyovSen1rWsiFTDgHeoLuVBf03lLim4gIdKlxQzpsvAxtmckRvznVMI4QjYPP7QxJr9LkJnfQdroQFvp_5_GSoeIqlRAv0gRscO5cXrH7s4N7QDBMVUkfVNKcEoAEkdwDxThH6gDfV2a_G_SUxcnImchZtayPtNsdFKLNdMXZrBHEf2lcEHu-ah757idrG2RjLpz3SrpYKyzmFsiRFqL8baum6V3CwF3hTBwwsmNRvyiME3pjgN0XXDPa-4zv-yzbhmiCgvqsUOgZ-aFj4MendmhjYO067p1DxPGxVkR-pRJRD; gulu_source_res=eyJwX2luIjoiN2M4YTc2ZWZiODlkOGY4ZWEzM2M0ZjM5OWM2MGY0Mjg5OTFmNmNmZjA5YTE5MmIxZTNhZjMzNzMxZjA2NDY3MSJ9; bd_ticket_guard_client_data_v2=eyJyZWVfcHVibGljX2tleSI6IkJIRFhGbDhicUpxMmtYNFQydHI0ZURJalRqOHZwRE92TmdvSDMrcWFTQ3czUnJLQVI1YzFwblBTVGF4MXlQRktXTk9OYlRpQmt5RWNSM1VhNHdBTkFmOD0iLCJ0c19zaWduIjoidHMuMi4yYjA5YmVjNTEyZDZlYjQzMmNiYmUwZTI2MWM3OWEyOTAyZmQ2YmNjZmEyYjU4OWUyZDk4ZDBkMzJjZjgxMjVlYzRmYmU4N2QyMzE5Y2YwNTMxODYyNGNlZGExNDkxMWNhNDA2ZGVkYmViZWRkYjJlMzBmY2U4ZDRmYTAyNTc1ZCIsInJlcV9jb250ZW50Ijoic2VjX3RzIiwicmVxX3NpZ24iOiI3YXl5T2RzUHAzNUZFbm10dEpqNllxUEkyVW9ocDM0aU5iKzBnNHdYOGc4PSIsInNlY190cyI6IiMvbWpBdTdTQTdEQ2t2ZzNWcnhuTHpZUVFJSWZlTUozUE8rWWlzRFFOOExIOHkwQzNxUVhXd1VKNlFsZm0ifQ%3D%3D; odin_tt=770e502ba1e9523d0671bbea807e5950a0de491ac4cf3506da1472409e3a607bde8e4f00ef0c2706a8a0d6af4609ab331104e4b8068cfc6fd4376c12c2f5a81a; IsDouyinActive=false; stream_player_status_params=%22%7B%5C%22is_auto_play%5C%22%3A0%2C%5C%22is_full_screen%5C%22%3A0%2C%5C%22is_full_webscreen%5C%22%3A0%2C%5C%22is_mute%5C%22%3A0%2C%5C%22is_speed%5C%22%3A1%2C%5C%22is_visible%5C%22%3A0%7D%22'
+    fp = dy_cookie.split('s_v_web_id=')[1].split(';')[0]
+    uifid = dy_cookie.split('UIFID=')[1].split(';')[0]
+    if not fp or not uifid:
+        print("cookie不正确，请查看评论，使用评论接口的cookie")
+        return {}
+    douyinUserinfo = {
+        'uifid': uifid,
+        'fp': fp,
+        'cookie': dy_cookie,
+        'webid': '7658643419065959976',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+        'msToken': 'j7mYqo1pbBrzVXBU1d1lw4grxsaa7sPfXAwLvt8a-U_kxHh2a4Pr9LqG0y8n6w0_8fShqcb4IHSIKI_diP6L0aZ39YN4UJ00umS2wHCXzS6hyVvWdsK8UAGr3o0HXZQyaxFNj2HE-bdD_VIw-LzprjrS4bdsVt5w8aF0KdFS2AKgTKfECKMEBQ==',
+    }
+    json_data = json.loads(result)
+    sku_info_list = []
+    for data in json_data['data']['summary_promotions']:
+        _promotion_id = data['promotion_id']
+        _product_id = data['product_id']
+        product_name = data['base_model']['product_info']['name']
+
+        sku_result = api.getSku2(_product_id, douyinUserinfo)
+        print("sku详情:", json.dumps(sku_result))
+        skus = []
+        sku_spec_dict = {}
+        for sku_spec in sku_result['data']['specs']:
+            sku_name = sku_spec['name']
+            for sku_title in sku_spec['spec_items']:
+                sku_spec_dict.update({
+                    sku_title['id']: sku_name+":"+sku_title['name']
+                })
+        for sku_spec_id, sku_ids in sku_result['data']['skus'].items():
+            sku_spec_list = sku_spec_id.split('_')
+            if len(sku_spec_list) == 2:
+                sku_name = sku_spec_dict.get(sku_spec_list[1]) + ' - ' + sku_spec_dict.get(sku_spec_list[0])
+            else:
+                sku_name = sku_spec_dict.get(sku_spec_list[0])
+            sku_id = sku_ids['sku_id']
+            skus.append({sku_id: sku_name})
+
+        sks = [list(sk.keys())[0] for sk in skus]
+        skul = [sks[i:i + 20] for i in range(0, len(sks), 20)]
+        for skud in skul:
+            print("skud", skud)
+            skuPrice = api.getSkuPrice(_product_id, skud, douyinUserinfo)
+            print("sku价格详情", json.dumps(skuPrice))
+            sku_spec_dict = {}
+            for pk in skuPrice['data']['shop_product_cards'][0]['invalid_product_cards']:
+                sku_id = pk['sku_id']
+                spec_info = pk['spec_info']
+                # 简化sku名称,不要区服等信息,只取选中的结果
+                sku_name = ','.join([sku_val['value'] for sku_val in spec_info])
+                sku_spec_dict.update({sku_id: {
+                    "sku_id": sku_id,
+                    "sku_info": spec_info,
+                    "sku_name": sku_name,
+                    "sku_price": pk['price'],
+                    "sku_image": pk['pic'],
+                    "title": pk['title'],
+                    "spec_info_desc": pk['spec_info_desc']
+                }})
+
+            sku_info_list.append({
+                'product_name': product_name,
+                'product_id': _product_id,
+                'promotion_id': _promotion_id,
+                'skus': sku_spec_dict,
+            })
+        print("汇总好的数据", sku_info_list)
+    # 把结果存入本地
+    with open('skus.json', 'w', encoding='utf-8') as f:
+        json.dump(sku_info_list, f, ensure_ascii=False, indent=2)
+    return sku_info_list
 
 
+cid = 'd9ba8ae07d955b83c3b04280f3dc5a4a'
 
-
+def run_buyin_sku(api, promotion_id, session_file=None):
+    """Use the saved Chrome context and retain rotated session parameters."""
+    path = (Path(session_file) if session_file is not None else
+            Path(__file__).resolve().parent / 'fingerprintjs/private/chrome-session.json')
+    session = json.loads(path.read_text('utf-8'))
+    userinfo = session.get('userinfo')
+    if not isinstance(userinfo, dict):
+        raise ValueError('百应会话文件缺少 userinfo 对象')
+    raw = api.getShopSku(promotion_id=str(promotion_id), userInfo=userinfo)
+    try:
+        result = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw
+    params = result.get('params') if isinstance(result, dict) else None
+    if isinstance(params, dict) and params.get('cookie') and params.get('msToken'):
+        session['promotion_id'] = str(promotion_id)
+        session['userinfo'] = params
+        path.write_text(json.dumps(session, ensure_ascii=False, indent=2), 'utf-8')
+    return raw
 
 
 if __name__ == '__main__':
-    api = TikTokApi('d9ba8ae07d955b83c3b04280f3dc5a4a')
-    cookie = ""
-    device = {}
+    api = TikTokApi(cid)
+    cookie = "passport_csrf_token=0d7ccd6001f05818320183425ce06da9; passport_csrf_token_default=0d7ccd6001f05818320183425ce06da9; store-region=cn-jx; install_id=7704017061957273145; ttreq=1$9d284cedf8ea2b6de8b2916c1af255675013ebab; passport_mfa_token=Cja326%2FXYRcMLQPc7tNMpLmPNJC3tdwkZFn8asaeDvz%2BoilifzL2X10jJNrw0S16PEYztEWXN9caSgo8AAAAAAAAAAAAAFEgAaIREALG3E0FqFydz4UraRWm%2FkQeEIOqxjUFbHLBTf88iw1cc%2Bl2F%2F%2F7eXfiUK3gEOWroQ4Y9rHRbCACIgEDvuQyFg%3D%3D; d_ticket=7f0a3e1abce0ae407ce472e6a6e817bb2a0cb; multi_sids=4140102066118552%3A70e87315796a2961c288e7e05346e988; passport_assist_user=ClDhnvLmRVKHXugriJJbSJR_yT9qNhsVnfL7sxCwK1cixWRQDHFyoR0gj4Fa-eDdtAkHO7dokODFeOtMZ393VtfH1XsiLcZ9zs0LBA1vAJ2CphpKCjwAAAAAAAAAAAAAUSC9k6pO-Hgv_EjSWO-mTYoJZup9UVxOXOXk8qrjUai81xg8nHwUKO7-nXPMOGiR59gQ5auhDhiJr9ZUIAEiAQOkueRN; n_mh=RFTaY-jAojtCt7jWGcid8TjPYNkvtyNT6WLQMlafxgE; sid_guard=70e87315796a2961c288e7e05346e988%7C1794393816%7C5184000%7CSun%2C+10-Jan-2027+10%3A43%3A36+GMT; uid_tt=d657a6c64dc79a3ffca9aa0d702c02a9; uid_tt_ss=d657a6c64dc79a3ffca9aa0d702c02a9; sid_tt=70e87315796a2961c288e7e05346e988; sessionid=70e87315796a2961c288e7e05346e988; sessionid_ss=70e87315796a2961c288e7e05346e988; session_tlb_tag=sttt%7C15%7CcOhzFXlqKWHCiOfgU0bpiP_________wnyFI5fclNl86_bLVJ31zFADsYva37XxTJCZQDZOWsDQ%3D; is_staff_user=false; has_biz_token=false; store-region-src=uid; ticket_guard_has_set_public_key=1; odin_tt=7cd8e23bbdfc4537601b9ec7684016aa50a9f80a6c7bc2c86326f2b82fffdac76afdfe7ff46daf1b15fb2197425689360404dff0245b678ec0187a9dbc63b7b5eed1939492fe8d68915cff8b631bf6bc"
+    device = {"iid": "7704017061957273145", "device_id": "1184648882315275", "klink_egdi": "AAIhNA5aKE_BdFbZPuDzJBmFTTs4asooF6ijl7wK3U6KS4Q6vqVEuvgP", "device_token":"AAAURARUMIEGCQNUZ2DPYFJP3DAHJ32MRUNRXJYX2CIXAJ7T22QJQXH6QCUUX3LKGPC3YRE2733TAJEQIWGW44GLWELAZIVRFDIFI55XAVO6B5MZJ6MUQO3LASFMVS7MMO74TFITKWGBCCOHYLP6X5Q"}
     ApiInfo = api.get_ApiInfo()
     print('Api信息:' + ApiInfo)
-
+    video_id = '7699720868088264866'
+    # print("发送验证码", api.app_send_code('',device))
+    print("评论详情", api.app_comment_list(video_id, device))
+    # print("播放上报", api.app_play_report(video_id, device, cookie))
     # api.getlive()
 
     # app取设备号
@@ -1519,7 +2320,6 @@ if __name__ == '__main__':
     # web版获取cookie
     # cookie: str = api.get_web_cookie()
     # print('ret_cookie:', cookie)
-    video_id = '7361479239318768950'
     page = 0
 
     # device_id = device['data'][0]['device_id']
@@ -1527,7 +2327,7 @@ if __name__ == '__main__':
     # ttdt = device['data'][0]['device_token']
 
     # web获取视频信息
-    # video_list = [7444518837912964388,7445547661677169931,7456796563868765450]
+    video_list = [7613474260056684874]
     # api.get_video_info(video_list)
 
     # 获取作品列表
@@ -1567,11 +2367,12 @@ if __name__ == '__main__':
     #     "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3725012931763634178,https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3654381246617882711"
     # )
 
-    # 获取msToken，userAgent仅支持谷歌浏览器149版本，否则会封号，需要自己组装strData才支持其它版本
-    cookies = 'gfkadpd=2631,22740; s_v_web_id=verify_mr20xts5_kMGEXC9u_LEx1_4204_8EHD_vpeE5s3wENPo; passport_csrf_token=2fd773eaf3f6b09cccbacae7b466bc49; passport_csrf_token_default=2fd773eaf3f6b09cccbacae7b466bc49; is_staff_user=false; has_biz_token=false; x-web-secsdk-uid=74eb2c8b-6ba9-4628-9780-2d05507c8d84; _tea_utm_cache_3813=undefined; scmVer=1.0.2.1362; csrf_session_id=316848ac3ce5cd23564f3bd9ac1c5154; ttcid=ab706bb05f53451ab58d1343eaa9ba3834; tt_scid=So..odZMil6aCrLU-HRYMtWqXvm5DEQVB66Zw3F5UmDBVWQliIIIqYgsU6zTrTwi9d2a; ttwid=1%7CHqxoNSFpRIbB4RBU6q23pcKtZnNK2Cf5jliLVUpY-fw%7C1782921784%7C558a4e3fbe98ceab38a786dad95cd6327fb61d881b53392cba1f93b472b59851; odin_tt=ad8ab6344e51f4eb3f3b5e82f2f87095570be9410f1e7b7ce22a71e76be2b7ac811aa82e49038e0ced0515eb26dc8feab65829ac2dc741601eca891f5a89c353; passport_auth_status=048d343001a01a6f59da49846fda2e12%2Cd6e2c055f8c0dfa70548d71bb2caba84; passport_auth_status_ss=048d343001a01a6f59da49846fda2e12%2Cd6e2c055f8c0dfa70548d71bb2caba84; uid_tt=060ad0233972341e848fe4ab648aa39d; uid_tt_ss=060ad0233972341e848fe4ab648aa39d; sid_tt=8a7ba44ab8dd81ba532d19c2be851634; sessionid=8a7ba44ab8dd81ba532d19c2be851634; sessionid_ss=8a7ba44ab8dd81ba532d19c2be851634; ucas_c0_buyin=CkEKBTEuMC4wEKiIiMqKxs6iahi9LyDXl5CAxaz9BiiPETCK8YDZ8K24A0C69JTSBki6qNHUBlCqvJe89pi8ompYfhIUoCG_XuvO5y8lgJPjSYqSj4u7mhs; ucas_c0_ss_buyin=CkEKBTEuMC4wEKiIiMqKxs6iahi9LyDXl5CAxaz9BiiPETCK8YDZ8K24A0C69JTSBki6qNHUBlCqvJe89pi8ompYfhIUoCG_XuvO5y8lgJPjSYqSj4u7mhs; sid_guard=8a7ba44ab8dd81ba532d19c2be851634%7C1782921786%7C5184000%7CSun%2C+30-Aug-2026+16%3A03%3A06+GMT; session_tlb_tag=sttt%7C13%7CinukSrjdgbpTLRnCvoUWNP________-1W4vXGaq7YcGs3kTOnXBgIIm9Kf354WgGoxWIU-NkD8w%3D; sid_ucp_v1=1.0.0-KDJiOTM2NjIxZGRkZWYyYjAyMGQxMzg2MTkzOWZiZTRjYjFiZWFmMjUKGAiK8YDZ8K24AxC69JTSBhiPESAMOAhAJhoCbHEiIDhhN2JhNDRhYjhkZDgxYmE1MzJkMTljMmJlODUxNjM0; ssid_ucp_v1=1.0.0-KDJiOTM2NjIxZGRkZWYyYjAyMGQxMzg2MTkzOWZiZTRjYjFiZWFmMjUKGAiK8YDZ8K24AxC69JTSBhiPESAMOAhAJhoCbHEiIDhhN2JhNDRhYjhkZDgxYmE1MzJkMTljMmJlODUxNjM0; SASID=SID2_7657589840313794857; BUYIN_SASID=SID2_7657589840313794857; buyin_shop_type=24; buyin_account_child_type=1128; buyin_app_id=1128; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; ecom_us_lt_buyin=0affc65f699cb6381c07a6e633ee30dcee3527b9c5a11adc26c7bb65bf193d54; ecom_us_lt_ss_buyin=0affc65f699cb6381c07a6e633ee30dcee3527b9c5a11adc26c7bb65bf193d54'
+    cookies = 's_v_web_id=verify_mtth3x8u_vqK1wU4f_V1W4_4Gn0_9j3i_92onnaIwbZml; passport_csrf_token=0f265254ea21a789ccee1052cb9907a0; passport_csrf_token_default=0f265254ea21a789ccee1052cb9907a0; is_staff_user=false; has_biz_token=false; qc_tt_tag=0; ttwid=1%7CKifMDj-B_NmN5MCT00jeQTXDmTV6m3WZjrIllLseMBY%7C1793448100%7C981e6afa8d6924425f1c51da8be921e333476ba16d8d7915922bce43f808710d; odin_tt=c39116e3e5bb78458f78350778da205e239e32cef8f0067ba0e995e4fee5291234d3e6f2252bb4fc149ef23576325745783690711f16ffcae5cc045c447b7bb9; passport_auth_status=d4113eff0a72e05851f59213177522a3%2C; passport_auth_status_ss=d4113eff0a72e05851f59213177522a3%2C; buyin_shop_type=24; buyin_shop_type_v2=24; buyin_account_child_type_v2=1128; buyin_app_id_v2=1128; _tea_utm_cache_3813=undefined; gfkadpd=2631,22740; ucas_c0_buyin=CkEKBTEuMC4wEKuIkN65i4P1ahi9LyCb2eGWoK3hAyiPETCK8YDZ8K24A0DsmKjXBkjszOTZBlCavLW8s8SF0GpYfhIUV3CAzdiKo9ztNABjGENaWU73osQ; ucas_c0_ss_buyin=CkEKBTEuMC4wEKuIkN65i4P1ahi9LyCb2eGWoK3hAyiPETCK8YDZ8K24A0DsmKjXBkjszOTZBlCavLW8s8SF0GpYfhIUV3CAzdiKo9ztNABjGENaWU73osQ; sid_guard=72080d5dd5d6c706a8686a1be4eec36b%7C1793723500%7C5184000%7CSat%2C+02-Jan-2027+16%3A31%3A40+GMT; uid_tt=d035d9bf9101235a888947d2c6f6578a; uid_tt_ss=d035d9bf9101235a888947d2c6f6578a; sid_tt=72080d5dd5d6c706a8686a1be4eec36b; sessionid=72080d5dd5d6c706a8686a1be4eec36b; sessionid_ss=72080d5dd5d6c706a8686a1be4eec36b; session_tlb_tag=sttt%7C1%7CcggNXdXWxwaoaGob5O7Da__________Uz3gXivc92IlKOMI_D4iqSbBa38QpgWEDLPTObnGEKx0%3D; sid_ucp_v1=1.0.0-KDZkN2ZlY2I5Mjg2MTRlNzAwM2VhNzI0NmUzZGYwYmUzOGEwN2M3ZDQKFgiK8YDZ8K24AxDsmKjXBhiPETgIQCYaAmhsIiA3MjA4MGQ1ZGQ1ZDZjNzA2YTg2ODZhMWJlNGVlYzM2Yg; ssid_ucp_v1=1.0.0-KDZkN2ZlY2I5Mjg2MTRlNzAwM2VhNzI0NmUzZGYwYmUzOGEwN2M3ZDQKFgiK8YDZ8K24AxDsmKjXBhiPETgIQCYaAmhsIiA3MjA4MGQ1ZGQ1ZDZjNzA2YTg2ODZhMWJlNGVlYzM2Yg; SASID=SID2_7703983414944989501; BUYIN_SASID=SID2_7703983414944989501; buyin_account_child_type=1128; buyin_app_id=1128; ecom_us_lt_buyin_top=cc7a86f7ff9a1b50cab491c4b7a8c822ac0298d1b1ec6714eb3b5d66fb9ded2b; ecom_us_lt_ss_buyin_top=cc7a86f7ff9a1b50cab491c4b7a8c822ac0298d1b1ec6714eb3b5d66fb9ded2b; ecom_us_lt_buyin=cc7a86f7ff9a1b50cab491c4b7a8c822ac0298d1b1ec6714eb3b5d66fb9ded2b; ecom_us_lt_ss_buyin=cc7a86f7ff9a1b50cab491c4b7a8c822ac0298d1b1ec6714eb3b5d66fb9ded2b; scmVer=1.0.2.2100; tt_scid=lw9XTcEZUeuANYfJGGvVgkCGpD1YOlqn0ejOJ39RCNxWX-wEzK.OgXKYLm1ZSXyuc5d2; csrf_session_id=e56066920570dc7bd8f87d8b0e00ec51'
     if not cookies:
         print("请输入cookie")
-    test()
+    # test()
+    # test2()
+    # "product_id":"3804415375286862084","promotion_id":"3808579876391354600"
     # headers = api.JuLiangHeaders(cookie_str=cookies)
     # print(headers)
     # uuid_str = str(uuid.uuid4())
@@ -1579,17 +2380,19 @@ if __name__ == '__main__':
     # print("生成msToken", msToken)
     # msToken = api.getMsToken(head=headers, msToken=msToken, uuid_str=uuid_str)
     # print("更新msToken", msToken)
-    # strData = "fWb4VpEcp3IdQ0PMaEJ0om0NsBinsdOCEBYH3BHo3NjovDdB7nzU402Q5VFuKTOXLF5oTYHn9HikdWPzdgz9Ix2iywlgoyhIpXa5UVOjD8KxzKfccRTq1eGIY0/+xMkl7yWuqHcQQ8Lz0lmQH7XFhkL6wY3mUJ1ST/buX1ysD51NhHasZMoHkProEAny3N8pttemETcp1tdsftF6uSbd+1I/DiGX+avVkCR8jZnrFqF3WnhRMXx/ekxgwFYk0CCeXOlnBb8jvGThpVD4XtG6tOooSBx3nDWqiFy5riLhH03N4zDQu34935U+8gB/FV4RMY7lNHnnFny8guTj7oz2J3B7OCACAsEOGWmSD4Aqn1L4tEp3izP+534g8F5B8Mhp0GnhyB4vvHQ7c4P2V/EPQ0hDe2nkmiJeB6zrKnNZ7awUxHMWehqvHYqw2Ov3PqHz6Hgt4Zuw6P0bP4PBv/kl7cIqNZbgJ4r3io7a6A7pl/dTnWkWecTu/FXHxmSQkQ6FGshLXN85ny5949CL4W64cm9aqfaKGIyNnvyEnyQtCqdlsSlG+mMk9C3m26TNh3ycxsHy3p8e5GVttcBlpv+fNRGJmvqrO98WcTLXIsaPvhcHk+Ea9sjLYUHwL9B+us/GM/d6jwgwDn38WxW5pTo0nisysZ0m11eYLZzcsfvJGJ/cQgtCrWkDYqKdOHgCbLZLQ0rz7tZuAFMoK3f7nW5ih2F6hqBDyW3PEKplI4lijOobb3yN6+GFygXnKZksZiOKaX5JaaDz22zKuLLzJueQ2zP0OPx3omS/zZyyQeCfjPZ+h+LSKlMKNyi37kUQdNe3Kkd40G+M/Cb5Cbz7bIicSG9FVm/eP6+XyczwHG4XxwNnKhjFnf5YfpTKNG9L/VmfsADuQp0YFs5WG9xIOIoGQFn8u4C8ZtGKniTfIaA56O1vr++JnZsm6AXdLpvgA4muh9Ls5X1xqgPzULbpLCxUw7r8VEnYKHNp9z4dv0xHgODZdxfPpBOmLvllF1uBGuNTcTrmwOXpVK4xlwofupXPWBwRYYJGXQJGvCR9Tp0uTsDDCgRSJ0JcMjSKHvCg5gJiK6BJU9sauMjuZT64bIDcYMuME9Dq22uuUQ/4PrhbSedEvhFziX4FIqwxOW2i7WDPgM1DFUdnW6lAlqB4qGGO5sj+w62hhsbeNBxGzYT/ssN7zNJfmDwf0F/Gop5QvxawXXPnwTk/1Pq3JxrYMhx5PZjfPer3vaJgiTXydJ6tntZ/s5i28bNR2VH+7PaguDhFalsh56b4b61E8bio0aq7vLTGvbIr0LsGXFoQA3b9iAvL3NzpbN+OEzAOb7mvqQtU7gpNtQdh4yVbHS6dqesbjV7XQ+bJOzEO8OmU8QnuB+myF/tbrUd3N/BnzSpqxOLw1NfxpaDM/QYHUo7CNBF62z1ojagYmqiXJcXFE5v1ziE+LTxu8fsO5IHwgwWgAYjZ3cc/HuYyhZYPHQoVOz1QBDsWL978euQZ0yuWepKtfdNPGWSgIBKFG80YD9q5SDBGDqkqQtUkiWTJtodght1jJMhz0yZGs0n9t2l1ImrgYFaGg5hmg+/kjjZPH47suX77XIA1xvIM2xoryhJ3f69ZxsRLoe0vOd2zuTrJPQjVBYrXWkDC5+yg878Up3uCjSP924US81jm2aVMURyCzkYkbqv7TMjtqau26KWHK15FLf5Qw8r6fiMBTYKU7TekGw7Nk1V42LD5O5jfe6cIRiIMpxGkJXScj6oXvMCR0jEOYE+bVLH5pozLt0KzmwtC0qubdaM6kR/gNLQjEDtXyQAFSiR15UVFYc/YTng/jxHpJ1WKc0SkFP4r+Ydc4MAUEfyhfF5U7ypHuTbSR9bzkA+2UgqGBvwACbE+eD5xDMAJlXCmpsQMAVIkcTQVB3Jvz3RgtjRc4FuMj439cm+StBmBUquZuh6o1ZPCObuTC4OJaQFa4TnKXZGWmle79iGEljn70WMVmToSMOYhmxEelVxTGWaxFNN6OZJY3X78hXpSSMiXUo3491xBMx3NBdwN1S8MNIhH6Dn3zgyrEcWpHtVVeF/lJQBCz7SOWPaxQF3uLAU4xWm4ovIFxEGBmAkx8rR6I60qmupOJHBR1q4tlQtSuyqvxH6FikyOo3yI/MDg5WuOGn4uDHPcNW6A+tc7kgWHjSLrSPNq5RjSX7Q/qb/kI2YZl+p/XsHRV7XcOELjWFkbAktZGro4pEvbfTDZFoQzA+9F84YmEs/TjTUOjcoyN+aM/bbLT2AxXvPBSqy6ORmf3vI/Gk3mFR6mTrG2sD9JWUJBuw3nSePq9NGSlmzk7fgbH4jSQvQr9yPKWezz2LLgVlgZ5DpWNIw7dpk1v8JUtYIubPqB/KqPIPDqpIRGV0ndd2+BHg1eOMbz9R2gx238IEPEBwLFKyfzCacnbJ1Pk429Iwcfvp0dYv0kc4cDgXn4YM999gLC33BZodmgQmPJu6YxioVN8lFabf/f4j4LG1CZACqZnLspT4Ou7ohelh3X1YmaHugbrUl9Yyw6hgLsHsU7YC4Oz/CtnnuFc4lY0s1/v9fVjR4SHp1c3xrpX2Oz46GTHAkNEgzWcnlqlAtgr+ei9WcnUpnXfqg5ViUOH20SqeAHVzS402tKpUZjRkQp+EebrLud9HdmpSlNoIZeoI2HJWnS514o1BtPtjXBftmNiy2a0QYWKrAABSxfYbPjq5IEbJWpPet+VXoA3DGNxVolqFJQvz3yqxFCWUWo9Oen8CkmMOnNq3GmKM8+9dBcGk/kBsNT5pMDPDjNOBRYtcAP5x8TnYC8HIESxzcwuc4xRRZJkOdDcvW0QWkXI2fYU0vmuHJgHrbMvATRQ7oS2H4OmTGyibSgAeqeADAvc6t5hCUqh0ww0NAwY2QJGZx5PoQX1nsWZugnfZc6kpa3K1A7afFeU4MwWLOCFsis4G0N+yktXw0xZMrGIC5+WeEguBxfxk/XacO0TAy275ZtrotxbDB+hfdXeIo9mWb07jV+3hG0GeSqRqCaa1NnuBDjkMskmlsPJohBWZxn+Qmi9HzO6RHuayWue7rCAHogCxS6eE2MCT9QDpawJwhEP8jDGg3PKNm7Ghag0zRy4tVFrdvIoHV5uxBaYtpNlSOi7p+o6DwL9rUJ6XLVyTDgm63583CMRN3LR0OLTDSf9BJ3HcvFGrcCpuKgRmSAQrwaKNlCTWyGrUFoyn2xZ6cDuhmqM+H5NNlPNNkaiIOaYiuEuwxzJNGH+pns0kJX903dck2my28Rv0iwr1GkdqHFNCfbU3a1s8gWphZ5s1jkzVbYJ+5Y66NfBvtyZnAputydUkChwqdnkSsPUJIt6kvw1KdjDY9XymVU0IkiG8Rgw2ptKRMvO4A6H6UrrIlvDoMH/H3MhIlgF/o0wtheUrm9RUu2+BGUpFvW10IB6FA5TrHKArJXp9xUK55hEDUvMiXBYR6CGor738ePxaR8Gq50GSfs8cLFTgKbQRW1a+0ud8iYsSvXhsVOMjpUUwqJAHEIkTswolLeev0lazw3t0cD2PrrYksiryM201wTVpwB3jwhIRxWRodK2Y34u5sXI7Tzt/oLCwffoQibNPMUzCn2BErlpdFMU4mnsStfQqwddr2tdAM5ntc0zf3S6H2sYC8Vbl1TiSWjP9/V2lAcfZcs3CFzojZTvXDjd9jgQu5STwKGPN5+SJ7ddq0b6p3XglQJp7E3ANaSwGWaxV/g5vwEfMGJEmodGtSo+oZJI3SsNWW9aeYc0B2ksDr3YprgpxiC+utxjpbReWS+bohUFgTSNbQ7NC5dui9yAByPZ00c+y152TtLQE/wAROywUxku9BdWddFlG9rINTXd+tUy+hhL54dEauZrPRw90oL9VlwXwmYs92vEACNChbd9AeLscHxTF+VU7tMMih4MVelppuMPH8myfgZn/bA7XtoQ0kGACfa5Hz21V8tB7N4cYrQTlA9cc4jlf4HFnWBbcNkhcnLiMlbOX6R3bTAMtv8LH4vnhgfuvx9m67IINrv0ys9kYUNaFK3MJqj2S9QpLeWaoCtd1Jy8xW7MW6B75C4H6L+cnRJjhZXI+BjT/vnE3cK18JzMk80jdI9p4N9fvZ25+JtSUkpEX1AGyTQB5a/U2rbCVvepUlEOGBs90loER1Z+aNIE23kR80hBL+DWpz6k9fEgBgsVmmOiOKtJ157lq6oDD78cmKzxRY8vEDrrXcXHLsWK3tEZgcRcC+K3g1MNFTwU5WRpYEnd1Yx5jxEve2Q4jjlpCZL2QG9eqpCDi5/cmZvLXqbUiWdFxPQt6A0s4hUaZHi3z8xOdSQOiFhFauaZb/wa/HjyD6dDRkhgoD7cKiBqTmvjhylQl/Rcdm9UJnNS2vOmEj1knxjAJGrr2fWRJXijz06x0oGc1tleyKD2SenAdPjxWYHUmp6RX+rkPQd+oS5AEf34zklGQWISCHmB5kigtThl73xdiD/AN2dnw+KhDmHVKzvd3Af3hSbg6gW5iWh5dwbEzuuXgzN2w53ad8jOGMK9cl9AdaNUIhgjlF+GhCru0uLWETJdOZhDMOy7wePbvYZeCttqwbrBMuxazNGK59PgYdzXrJ82hOwqF1YWPD09avnGzfUgtBo18FdIQQ9gUXIH7qqCgPcEbzC9mywZjrG0YvKAvi4o+DIpAHDWjrnD8UtKI5wpTXPzvM+KB2k60hiDEBfns9vGoKCcZIOldn+CQumC3UAcMGSkPHYNX/IOaERXJdcHdKHrPuNw14jPRCqJJHBpFKI9Q6CjHq2rpoYNfc21amTGDX6BTH3VMSqHNv95SRW0sn31u30SfWygdLh4kidiJnY5uCRIX4oJ0WYezmSW1mLitgVciXcGS7AhLGlkSrDkO+Igza9668VI2LQ70l4oUSQ5rQ4im+W/g7fdDw8bHxjSv9fPmH/Tss5grCik6ppPYMcrStPlo3sI+U96ZaBZADPZBE2fFv36IPMC5PLEQknmG7zPwvhyb+j/fBEx06h2Q+bP631Q00mbY15lnze7RyaE0dwclD8S8nWImArbxmu53aBKqVXaUA/3njK4hn3qgmXaUE9sUUk5cFwUyUzxRRtCDb5pqocJ/tEPJvGhJ40zx3I/cseIJ7TcslkyIBUyXM0d0ArJtRc75/R5n77B9FGRYCmvCKYvZ7QvhxbAELLSLv6fSLWYhUHfrw/jGLbr6nuhb2X4FCU1Ct/cyNZdOG6DJW5diMX3mQB5ZlSI/4wXySWdxw6R+Lt+d5AKQ0/qZlJu3nUNIyxAFiT5LMGW5xB8HPq1OO0AUc+vIvo5hffPLM/RryiD59u1yfsAD1ys4a9oMqPFuvyHXYJ6pTu8AV/p4jW2TpEiLb+Jy0daJJWpWE3VSKSbEv93oGpyBSGOl+y1o5dl/SP5+VU2yEcsf4R/QW3hAvBNQ24sbTPwmyGKOtWj1KFuDZqC+V3EvdR8OE2QtbArbhzfFDCx34WSKo0sMJH4L4MfgvSNnlku/n6jquYJJ25jf6yk0Bz6YvfiEMC9E9sYUBw0XkIrZrUEx7eHte7OF1TtFeZYH98K1rpvVBXshEgZmtWgWO+38koN0N6+W8sFTTwUbyUF4pUYqWqMnUIBI5esaQei19Mn4FU+92+JXFpyEVe/SAa/siBAs8heunvwQSo3aGuQsVy3pCjcOqWakNVdhkfXhDBVrwnUSNYf+SG18xiowlTIXo4M1TYFrAIhU9/dQz3+dhVKyCkX7TtjIfKb7qwinGnt26XD5q33Gv1fM+xW+08jNfOtMfS+g55wDhDH58uwNiwvQY8iIyJlUPP89VbOhYJsR5zTT3KHcaPFTMvqX3AkO4qM+KQnuNfhQAYbdMBJxyf1YDTh0OGlviSmkLOpjAJQzPp+T4NaKsDWbcwIr+ZUTyv18iq/IYCN2nwQa0cUorA4NJtz18YcOZdqOtBFyJiT5R3lo6KjfzztVbUZMZLxFPrkDVjmzykWWkRLaE+HRmVjiqQg9qNd6RSAU4kFE74lRGbwr80+mML43rgjG7bl+s7//+wm0ON9fP/CoXbHgbkz1PLb2eKkZ/SR6gkPWAV2Oh8eGePTJajElchulsLFPaW9PfSR/aZVAmGK4xGhZdCbic9W2oKZPJ/kAwlrd9ShKBdo09xqx6Xr0OFWwPr0vSosp1OD43IrI0aRDUbj5aSSsQ66oKurkQvoYeU+tV7EU9wimxpY/m/OYLRMaNjlrO/PlY2odZOC/atlgakx1ifN9Dvsb0tckB9dNqfZgsihFjUKnnUUYjG+BpL7ex2HqIpPFmIVSYq9icuo2dW9p8YVWHDMOP3iJl7ZC68/pEAlWBVwlZpYyCqvfOUgd5LP21kFudgoAEpTxzwx6o06Fph0aofKVkebtIlOJ3EsQ5rEzcWJtYF/oUJIa+gPwPy/oHlBUkB8NJeXVZcnnY29YzqOLE38UTXRHDimOIRu5BA5R3igWnK9mRUbC4oSwV3ROyHd335bggPDaYJjxO2LmtybFsqq5OIffuWFvPpQBXkbA3HctXOCGmgPFiCX9aMOJCTNj5y4775yhXdYyzzpEwYTr4ViLNLxNCtIaURi9++huPjVBnM1sgiQBVGfU91Plkl+HqNaTew+pHTg5naOQ6J9allZPiYYJEl31hrggRvk53SyEBaK/G66ID/QI5df83CuWHoImNQcCoKjDnrOeHQWpEHMMyamqBDEsyuugu/PBvNK0Ks3lNVvFKNOmKA0Tbim10IAhTMNeOTZVV4i6wVdVA7oHXpWuC/dNzufV0oUirAY2Y0mhYfvg2QZVwNMCkQYg+JyHLZGMavxlKINd7QIuB44AGygNnH0SUjYI0uL1PbEP1LOa5N9APWFpl8MnDa/pfeFN0Yb/gpmo+dB+FB4frdr9R/6nXaZLcsWxz6n7tHNr4DjPdYxkHdXQ4DWaEOVyi30COBf9WhC6eWpr+3XjuT97zKZJrcPAq64iPUzTagYHlCkTvjlb7xceB94vAr/n3W8pDYX5OPp/QY1khfOjuSkz8Ja62rgZmtlD4NdOQB3CI1nGYjKUd7Y/Bv0GREZ+CJxnJgPzKyGMrueDgNHgDnAr5YIhumhK1j1T57LBxIJwPLPKl+VC+I0HYV0TJLglE2aQZeUgXfzv3PmpZKdnfx66NnM3JhJpI0tKKmaJSTVLZ9mpfuKpAQRIZBshvFr0OkacCUg5ilzPA9aP9Oqea4ASSNSZV0w/PJ82IXkxhCmiIW8R8BoV/47MAVb32W5l1q4mTtG61QaUO8lOgzRntXH2fzytE1CMwL6zbuDHNo/uVWiVEh+YcRwD/vA7g/1LZqkT0Kh16tG2z3uzZHCPkhCssZlhq4YOdu0kuuZZcsI941+RnQBKk7f9zYOxqXxTiQbiKluW26PfR31zKhPcZ4Br/2vzgJDYzDHqFJ/Izgj2pRlxPAAXIcmpVqljsDiZ3o964Vzd3NUbGFd/4BZtzkNFV5ahgW2TYMPyerv09D40LEYEidSumQ+EAWd41qYEM0ToVbqwQuLt4rySkTdQo4dg1BjzQH1VmbSzhbYJIso5TcWZM/yKV3Qr+V9CEOcqallO+bnleVwSvqoDWmfA4i50N7KSGksp8OzrEJ+TocrEAt7SO7MLkREGlLQlhfTTcKydQat2bPnnfXIJtj/5tkInb5rk5qz+7BwYjxGLHJmYao9vbfDFv28VBiDbxQlIiq6enwDtkRP8fyzZ/YU8KvZ/lEC6EUiMUthGI08zBPdGmTSIIPS9JTE5qe9n+unGbK9Af2/jRTCoVzdRz/ujmDp51EcGE0RDlm71jn9cTdOX+Xi8CKKpq6RErsuQCfc/V9Sn3Cj0m09iDJhhY14yhTGrbs2r5iV83OfGuil3qdFk86oDegYlfjWSJWUApOX9obV+o6Zfshy1XkUsBikEN5ZwyXTduetLSAmA8OD9JzJUfEuqU4WxxWAER7TM3kT6VNHMlapkqRBhGKWuulRSNoArT8ynJyHoilMMjPCFacJTvgmytBs1Ykd+1uFgGuxBzQBR66fapZeLDGSkNW9rQSSUaZOVqTSRj0Prof18FqQY0N0ebkcwTuwibhBhqz4VS27EQ3h/joshm1mqZ674hiLo0NK89FBB6dzxRL8zyCupRGTzwUSLw3Xz0JYfTvSxTyoRYRX1wDQSW4U2EQyufco4xRkuyLjmfZCHzQBt5JFIMPC0ScmgAia3uL5IcyGUn2l/Zo4CwBRxLMcmr3hpnA8p3muJhkEwWit4QPqxDHXHm5tsNJtIz2tB6iyr1EyyU9iBFYhgMeDj2G46IraB+QmJBvP8wpqWfm3Gjj807yPGbPncRk7QBbbQp29uh3yTcCNxOrP5UrUDbJzjFwuC4KE4xmcwD7prV6Ydy0VfFqVokHwHdAJL3FC6HOyH72uzWGq2ng6vzzkOAl7LImtW1rClNNpmT/y2umOwPrGdw5VsrwRFEUPCRW5kjqK0ZVh9fUj9RzeWpECL9f1n1KoFMrPfk7fnu1P4PSvB5X7iYl3AuvDASsI9zwQOECOMIu6Mf8QjnfnJXtkrtu16vphIQSvzmb7geb9xaNYY6lUuAZ4q8kYcUabsBBmXT+bzFq7uT56gBV/lp3PU9DT/XevFq2XuNIzcbyjCEUWFfaQHN+plYYzo1fs6tUzQa5GLeJCFKDYeiIZGrqyZLIXUGNzWZ0gC5phZvQVDsuQXohlWLWwVS97wq8lcZ5ScYgZ8sw2wUHKKcqNSkjkGyBMDwVwhzeN+dpN9ciADgsog+AmZk6ORijlRaCZERMycW9ZUXrwPnLVPdc+HhhUb8vA2CU6GnohL+s/a/d1diwpXopmmGWzy92obBp0us4jQ8EQO++M9WAxgt25ljnu3h6Gn2Z9ePFLW68FdK9fz1ZbFhyi/S5j8vL7EpKmo2yfcoHwdNgzqwaKXc+nnxjEYOMT0rf2j7qGnFjHrZdzDemAIutEiD6iPHXddQ/G9QQmTl42KCdHN95xnJ91SH+Q50uUBPh7RxcbBbz07DEKf1+foEKMWlpeAmAn6ZnyjbhK0x4WVoALKis8YVb0Cm0sf1TgLTH7sWgD77k/Ocz0nSVqxtmkopY7Tu2msh6hT42moVXfkKgEleSA4ofwU9UkvWRWtFN2oad53LjlR+ZFxUOBa476Jrtp+HTqI79qKefnnOC8cmv9oFEeH7fcrRcJRW5BDm7uikw+ZBLgWlOaG8T2WKlszrwUIePpt4rls3IDjl3cNcPTrXW67gMI3rsxg/mqrvPOQg4SHE+VJR4hNpikbz/lb9dKLWosQNkrnmKGl1+5RL54evmAzVIGEtu+VmNRan0cngYuWJMd1RQfP05/emJqTZZIu56olw5wjThOuuL6YyiWl/clj1on/Y22CjLy8mzHaIRqO40f5ZczfhwSDZsBMc+MgR3ne8VgvtB307NGZAh90nS7d2MwkUCHprcxYdWijEKJu7DqwQfxbRd0ZII2yK5LX7JIekWXy8DM2Fa/emUb3yI3lhF4crtIPfZHAM6rIbjpIH0A9vqHQOgntaK8xqXFfFJrcVbe46oTGGpzj=="
+    # strData = "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"
     # decrypt_strData = api.decryptStrData(strData)
-    # print("strData解密：", decrypt_strData)
-    # encrypt_strData = api.encryptStrData(decrypt_strData)
+    # print(decrypt_strData)
+    # print("strData解密：", json.dumps(json.loads(decrypt_strData['plaintext']), indent=2))
+    # decrypt_strData = open(r'ewid/demo2.json', encoding='utf-8').read()
+    # encrypt_strData = api.encryptStrData(json.dumps(json.loads(decrypt_strData), separators=(',',":")))
     # print("strData加密：", encrypt_strData)
-
-    # 通过商品id查询商品SKU（使用现成API仅支持Windows谷歌浏览器149版本）
-    msToken = ''
+    #
+    # print(len(encrypt_strData))
+    msToken = 'fl8ZUZ9-9VieGFp_-vPmHSizqHyTJNW_XEvRabxjZH-0xCatcOPDPLNdVj8I-DG1C734vlpPH_qWEYaYhOJj-CrV3r7kuadJamOwDo6Ded6iO_bFCBPKPrYL_kQgsxuCOA1-EH0-_xA7wqxFfV3mZe64AMcXL2qM6_MLLFusHuCWNa5n3Dtdog=='
     csrf_token = ''
-    promotion_id = '3826503724214386695'
-    # sku_result = api.getShopSku(promotion_id=promotion_id, cookie_str=cookies, msToken=msToken, csrf_token=csrf_token)
+    _promotion_id = '3764711900810707138'
+    # sku_result = run_buyin_sku(api, _promotion_id)
     # sku_result = json.loads(sku_result)
     # params_sku = sku_result['params']
     # sku_result_json = json.loads(sku_result['response'])
