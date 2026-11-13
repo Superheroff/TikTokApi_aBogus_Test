@@ -7,7 +7,7 @@ from pathlib import Path
 import random
 import time
 import re
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, parse_qs, urlparse
 import requests
 import math
 import uuid
@@ -188,19 +188,118 @@ class TikTokApi:
               'Build/BP2A.250605.031.A3; Cronet/TTNetVersion:f2d9b21f 2026-10-12 '
               'QuicVersion:636d43af 2026-09-02)')
 
-    # ree-public-key / client-cert / static-sign
-    # 这三项参与 bd-ticket-guard 计算与校验，sec-ts、server-cert-sn 是它们的输入。
+    # 票据链静态字段：跨会话逐字节不变的部分（与真机抓包一致）。
+    # ree-public-key / client-cert / static-sign 三项不写死，由
+    # ticket_guard_headers() 按私钥与 sec-ts 动态生成，保证三者自洽。
     TICKET_GUARD_HEADERS = {
-        'bd-ticket-guard-ree-public-key': 'BO0vWVQXMxU00vd13ZxYZpIzO+vQ/g8UxQeAhskvfCpUmsBPSrKdi2gQdjgR3LzdImj8dLHCnF52qgUQPFiFmSc=',
         'passport-sdk-settings': 'x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_2',
         'passport-sdk-sign': 'x-tt-token,sec_user_id',
         'bd-ticket-guard-tee-status': '0',
         'bd-ticket-guard-iteration-version': '2',
-        "ticket_guard_private_key": "0xAA84079218C5004A1240DFAD3660A6CDA8C89D425D319A3AEC3B26A638F5667B",
-        'bd-ticket-guard-client-cert': 'cHViLkJIY1NldWJXb2tob2lEbzlrNVZVZFZUeWs5aTZ4Z2paTUU1UnAyamNDcjE3SVZKUUJWczYrTmp3Y3djMUlxZWZNcWRtdGJzVnNoeDRFZTBmV1lMV2tzYz0=',
-        'bd-ticket-guard-sec-ts': '#wi8I5o4ukHFXKd9PwjLIi72DJeCF5kEQIchWS2oQyCyyAb6fTDbV+ChjDRi6',
-        'x-tt-request-tag': 'n=1;s=-1;p=0'
+        'x-tt-request-tag': 'n=1;s=-1;p=0',
     }
+
+    # 本地 P-256 私钥标量（0x 十六进制）；公钥、证书、签名都由它当场派生。
+    TICKET_GUARD_PRIVATE_KEY = '0xAA84079218C5004A1240DFAD3660A6CDA8C89D425D319A3AEC3B26A638F5667B'
+    # 服务端下发的 sec-ts 令牌，无法本地生成；为空则跳过 static-sign，不伪造。
+    TICKET_GUARD_SEC_TS = '#wi8I5o4ukHFXKd9PwjLIi72DJeCF5kEQIchWS2oQyCyyAb6fTDbV+ChjDRi6'
+
+    # FIPS 186-4 / SEC 2 P-256 参数；签名与证书全部纯 Python 计算，不引第三方库。
+    _P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+    _P256_A = _P256_P - 3
+    _P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+    _P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+    _P256_G = (0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
+               0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5)
+
+    @classmethod
+    def _p256_add(cls, u, v):
+        if u is None:
+            return v
+        if v is None:
+            return u
+        x, y = u
+        xx, yy = v
+        if x == xx and (y + yy) % cls._P256_P == 0:
+            return None
+        if u == v:
+            s = ((3 * x * x + cls._P256_A) * pow(2 * y, -1, cls._P256_P)) % cls._P256_P
+        else:
+            s = ((yy - y) * pow(xx - x, -1, cls._P256_P)) % cls._P256_P
+        nx = (s * s - x - xx) % cls._P256_P
+        return nx, (s * (x - nx) - y) % cls._P256_P
+
+    @classmethod
+    def _p256_mul(cls, k, point=None):
+        if not 0 < k < cls._P256_N:
+            raise ValueError('P-256 标量越界')
+        point = cls._P256_G if point is None else point
+        result = None
+        while k:
+            if k & 1:
+                result = cls._p256_add(result, point)
+            point = cls._p256_add(point, point)
+            k >>= 1
+        return result
+
+    @staticmethod
+    def _der_int(value):
+        raw = value.to_bytes((value.bit_length() + 7) // 8 or 1, 'big')
+        if raw[0] & 0x80:
+            raw = b'\x00' + raw
+        return b'\x02' + bytes([len(raw)]) + raw
+
+    @classmethod
+    def ticket_guard_headers(cls):
+        """按本地私钥与 sec-ts 动态生成票据链，静态字段原样保留。
+        私钥导出公钥 → 公钥写进 client-cert → 同一把钥匙对 sec-ts 做双重
+        SHA256 的 P-256 签名，三项因此始终自洽。sec-ts 是服务端下发的令牌，
+        不能本地生成；缺省时只跳过 static-sign，不伪造。
+        """
+        raw_key = cls.TICKET_GUARD_PRIVATE_KEY
+        if isinstance(raw_key, str):
+            raw_key = bytes.fromhex(raw_key[2:] if raw_key[:2].lower() == '0x' else raw_key)
+        private = int.from_bytes(raw_key, 'big') if isinstance(raw_key, bytes) else int(raw_key)
+        if not 0 < private < cls._P256_N:
+            raise ValueError('TICKET_GUARD_PRIVATE_KEY 不在 P-256 有效范围内')
+        x, y = cls._p256_mul(private)
+        public_raw = b'\x04' + x.to_bytes(32, 'big') + y.to_bytes(32, 'big')
+        headers = dict(cls.TICKET_GUARD_HEADERS)
+        headers['ticket_guard_private_key'] = cls.TICKET_GUARD_PRIVATE_KEY
+        sec_ts = cls.TICKET_GUARD_SEC_TS
+        if sec_ts:
+            headers['bd-ticket-guard-sec-ts'] = sec_ts
+        headers['bd-ticket-guard-ree-public-key'] = base64.b64encode(public_raw).decode()
+        headers['bd-ticket-guard-client-cert'] = base64.b64encode(
+            b'pub.' + base64.b64encode(public_raw)).decode()
+        if sec_ts:
+            digest = hashlib.sha256(('sec_ts=' + sec_ts).encode('utf-8')).digest()
+            z = int.from_bytes(hashlib.sha256(digest).digest(), 'big')
+            while True:
+                k = random.randrange(1, cls._P256_N)
+                r = cls._p256_mul(k)[0] % cls._P256_N
+                s = (pow(k, -1, cls._P256_N) * (z + r * private)) % cls._P256_N
+                if r and s:
+                    body = cls._der_int(r) + cls._der_int(s)
+                    headers['bd-ticket-guard-static-sign'] = base64.b64encode(
+                        b'\x30' + bytes([len(body)]) + body).decode()
+                    break
+        return headers
+
+    @staticmethod
+    def _signer_body_text(resp):
+        """签名服务的中文 msg 是 GBK 输出的，先 utf-8 再回退 gbk，避免乱码掩盖真实报错。"""
+        for encoding in ('utf-8', 'gbk'):
+            try:
+                return resp.content.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return resp.text
+
+    @staticmethod
+    def _query_value(url, key):
+        values = parse_qs(urlparse(url).query).get(key)
+        return values[0] if values else None
 
     def get_xgorgon(
             self,
@@ -209,14 +308,56 @@ class TikTokApi:
             body=None,
             body_encoding=None,
             device_token=None,
+            device_id=None,
+            iid=None,
             bd_ticket_guard=None,
             timeout=30
     ):
-        """调用本地 /dyapi/xgorgon，返回平铺的签名头字典。
+        """调用 /dyapi/xgorgon，返回平铺的签名头字典。
 
-        新接口入参：sign、url、body、device_token，可选 bd_ticket_guard /
-        device_token 缺省时取 headers 里的 x-tt-dt。
+        服务端硬性要求（缺一个就 400/404，不会给任何签名值）：
+        1. url 的查询串里必须同时有 device_id 和 iid（或显式传 device_id/iid）；
+        2. device_token 必须放在 JSON body 里（只放 headers 的 x-tt-dt 服务端不认）；
+        3. sign 与请求头 timestamp 必须同秒且不超过服务端时间窗，否则 404 签名无效；
+        4. bd_ticket_guard 里带 ticket_guard_private_key 时，必须同时带
+           bd-ticket-guard-sec-ts。
+
+        只有把 TG 放进 bd_ticket_guard（payload）才会有 static-sign / client-cert /
+        sec-ts / ree-public-key / tee-status 回显；只放请求头一律被忽略。为了不踩这个
+        坑，bd_ticket_guard 缺省时会自动从 headers 里收 bd-ticket-guard-* 与
+        ticket_guard_private_key，也接受 JSON 字符串。
         """
+        # 老调用点是 get_xgorgon(url, cookie, body, 'max', headers) 这种写法，第二个
+        # 位置参数其实是 Cookie 字符串，这里兼容掉，避免 str.get 直接抛 AttributeError。
+        if not isinstance(headers, dict):
+            headers = {}
+        device_id = str(device_id or self._query_value(url, 'device_id') or '')
+        iid = str(iid or self._query_value(url, 'iid') or '')
+        missing = [name for name, value in (('device_id', device_id), ('iid', iid)) if not value]
+        if missing:
+            raise ValueError('xgorgon 需要 %s：请放进 url 查询串或显式传入' % '/'.join(missing))
+
+        device_token = str(device_token or headers.get('x-tt-dt') or headers.get('X-Tt-Dt') or '')
+        if not device_token:
+            raise ValueError('xgorgon 需要 device_token：请显式传入或在 headers 里给 x-tt-dt')
+
+        if bd_ticket_guard is None:
+            # 只把 TG 字段当请求头发出去，服务端一律忽略（实测只回 16 个头、没有
+            # static-sign/client-cert）。这里自动把 headers 里的 TG 字段收进 payload。
+            collected = {key: value for key, value in headers.items()
+                         if key.lower().startswith('bd-ticket-guard-')
+                         or key.lower() == 'ticket_guard_private_key'}
+            if collected:
+                bd_ticket_guard = collected
+        elif isinstance(bd_ticket_guard, str):
+            bd_ticket_guard = json.loads(bd_ticket_guard)
+
+        if bd_ticket_guard:
+            flattened = {str(k).lower(): v for k, v in bd_ticket_guard.items()}
+            if 'ticket_guard_private_key' in flattened and not flattened.get('bd-ticket-guard-sec-ts'):
+                raise ValueError('bd_ticket_guard 带 ticket_guard_private_key 时必须同时带 '
+                                 'bd-ticket-guard-sec-ts')
+
         sign_url = TikTokApi.host + '/dyapi/xgorgon'
         ts = str(time.time()).split('.')[0]
         request_headers = {
@@ -225,10 +366,12 @@ class TikTokApi:
             'Content-Type': 'application/json',
         }
         payload = {
-            'sign': self.set_sign,
+            # sign 内部自己取时间，跨秒会和上面的 timestamp 对不上，这里固定同一 ts。
+            'sign': hashlib.md5(
+                ('1005' + self.cid + ts + self.__AppKey).encode('utf8')).hexdigest(),
             'url': url,
             'body': '' if body is None else body,
-            'device_token': str(device_token or (headers or {}).get('x-tt-dt') or ''),
+            'device_token': device_token,
         }
         if body_encoding:
             payload['body_encoding'] = body_encoding
@@ -236,9 +379,14 @@ class TikTokApi:
             payload['bd_ticket_guard'] = bd_ticket_guard
 
         resp = requests.post(sign_url, json=payload, headers=request_headers, timeout=timeout)
-        data = resp.json()
+        text = self._signer_body_text(resp)
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = {'raw': text[:500]}
         if resp.status_code != 200 or 'X-Gorgon' not in data:
-            raise RuntimeError('xgorgon 失败: %s %s' % (resp.status_code, data))
+            raise RuntimeError('xgorgon 失败: %s %s' % (
+                resp.status_code, data.get('msg') or data.get('detail') or text[:300]))
         print('xgorgon', data)
         return data
 
@@ -414,14 +562,23 @@ class TikTokApi:
             'passport-sdk-version': '60763', 'x-vc-bdturing-sdk-version': '4.2.2.cn',
             'x-tt-dt': str(device.get('device_token', '')), 'x-ss-req-ticket': str(now_ms),
             'x-tt-cipher-version': '1.0.0', 'x-tt-encrypt-info': '1',
-            **self.TICKET_GUARD_HEADERS,
+            **({'cookie': str(device['cookie'])} if device.get('cookie') else {}),
+            **({'x-tt-passport-csrf-token': str(device['csrf'])} if device.get('csrf') else {}),
+            **({'x-tt-device-dtrait-token': str(device['dtrait_token'])} if device.get('dtrait_token') else {}),
+            **({'x-tt-device-dtrait': str(device['dtrait'])} if device.get('dtrait') else {}),
+            **self.ticket_guard_headers(),
+            **({str(k): str(v) for k, v in device['tg_headers'].items()
+                if not k.startswith('bd-ticket-guard-client-data') and not k.startswith('bd-ticket-guard-version')
+                and not k.startswith('bd-ticket-guard-iteration-version')} if device.get('tg_headers') else {}),
         }
-        # 票据链是会话观测值（本地没有匹配私钥，重算只会得到对不上的密钥），
-        # 直接作为请求头携带即可，不再交给 /xgorgon 回显。
-        signed = self.get_xgorgon(url, body=raw_body.hex(), body_encoding='hex', headers=headers)
+
+        # 票据链是会话观测值：私钥在 headers 里，get_xgorgon 会自动收进
+        # bd_ticket_guard 交给服务端，换取 static-sign / client-cert 等回显。
+        signed = self.get_xgorgon(url, body=raw_body.hex(), body_encoding='hex', headers=headers,
+                                  bd_ticket_guard=device.get('bd_ticket_guard'))
         print(json.dumps(signed, ensure_ascii=False, indent=2))
         headers.update({str(k): str(v) for k, v in signed.items()})
-        resp = requests.post(url, data=raw_body, headers=headers, timeout=timeout)
+        resp = requests.post(url, data=raw_body, headers=headers, timeout=timeout, proxies={'http':'http://127.0.0.1:7890'})
         return resp.text
 
     def app_play_report(self, video_id, device, cookie=None, impr_id=None, play_ms=0, timeout=30):
@@ -475,9 +632,10 @@ class TikTokApi:
             'x-ss-req-ticket': str(now_ms),
             'content-type': 'application/x-www-form-urlencoded',
             'accept-encoding': 'identity',
-            **self.TICKET_GUARD_HEADERS
+            **self.ticket_guard_headers()
 
         }
+        print(headers)
         if cookie:
             headers['cookie'] = cookie
         signed = self.get_xgorgon(url, body=body, headers=headers)
@@ -496,10 +654,22 @@ class TikTokApi:
         resp = requests.post(url, data={'cid': self.cid, 'api': 'dyapi'}).text
         return resp
 
-    def get_device(self):
-        """
-        获取设备号
-        :return:
+    def get_device(self, proxy=None, model=None, brand=None, rom=None,
+                   resolution=None, dpi=None, oaid=None, bind=True):
+        """获取设备号：调用网关 /dyapi/device/register（注册 + dtrait 绑定 + 二次注册）
+
+        一次调用只注册一台设备。服务端按「设备指纹 + OAID」判定设备，本接口每次
+        随机生成指纹与 OAID，因此每次调用都会返回一台新设备（同 IP 有创建配额）。
+
+        :param proxy:      代理，支持 "http://user:pwd@host:port" 或 {"host","user","password"}
+        :param model:      指定机型，缺省随机
+        :param brand:      指定品牌，缺省随机
+        :param rom:        指定 ROM，缺省随机
+        :param resolution: 指定分辨率，如 1260*2720
+        :param dpi:        指定 DPI
+        :param oaid:       指定 OAID，缺省随机
+        :param bind:       是否执行 dtrait 绑定，默认 True
+        :return: 单个设备 dict
         """
         ts = str(time.time()).split('.')[0]
         header = {
@@ -507,21 +677,27 @@ class TikTokApi:
             'timestamp': ts,
             'user-agent': 'okhttp/3.10.0.12'
         }
-        sign = self.set_sign
         params = {
-            'sign': sign,
-            'set_ip': '0',
-            'num': '1'
+            'sign': self.set_sign,
+            'bind': 'true' if bind else 'false',
         }
-
-        """
-        set_ip：0=随机设备池，1=根据ip分配固定设备池
-        num: 获取设备的数量
-        """
-        device_url = TikTokApi.host + '/dyapi/get_device'
-        resp = requests.post(device_url, data=params, headers=header)
-        print('设备id:', resp.text)
-        return resp.json()
+        if proxy:
+            params['proxy'] = proxy if isinstance(proxy, str) else json.dumps(proxy, ensure_ascii=False)
+        for name, value in (('model', model), ('brand', brand), ('rom', rom),
+                            ('resolution', resolution), ('dpi', dpi), ('oaid', oaid)):
+            if value not in (None, ''):
+                params[name] = str(value)
+        resp = requests.post(TikTokApi.host + '/dyapi/device/register',
+                             data=params, headers=header, timeout=90)
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError('设备注册接口返回非 JSON: %s %s' % (resp.status_code, resp.text[:200]))
+        if resp.status_code != 200:
+            raise RuntimeError('设备注册失败: %s %s' % (resp.status_code, data))
+        print('设备id:', data.get('device_id'), 'iid:', data.get('iid'),
+              'new_user:', data.get('new_user'), 'bound:', data.get('bound'))
+        return data
 
     def __md5(self, string):
         post_data = gzip.compress(bytes(json.dumps(string), encoding="utf8"))
@@ -530,7 +706,7 @@ class TikTokApi:
         str_md5 = m.hexdigest()
         return str_md5.upper()
 
-    def get_shop_product(self, uid):
+    def get_shop_product(self, uid, device_token=''):
         """
         获取橱窗列表
         :param uid:
@@ -568,7 +744,9 @@ class TikTokApi:
             'User-Agent': 'com.ss.android.ugc.aweme.lite/150900 (Linux; U; Android 9; zh_CN; MI 9; Build/NMF26X; Cronet/TTNetVersion:a87ab8c7 2020-11-24 QuicVersion:47946d2a 2020-10-14)',
             "Cookie": "store-region=cn-jx; ttreq=1$1430dbab38a934b2fa67d2b0d60d1c93fba83ca7; passport_csrf_token=59d6b08cd8db90cfe156c4bbdcdf4d1c; passport_csrf_token_default=59d6b08cd8db90cfe156c4bbdcdf4d1c; d_ticket=06fa9938e030782addd82051850bca62a49ad; multi_sids=1618070996524280%3A0a7fb4782a2469191a11260deb6600df; passport_assist_user=CkHH2OYUv87kxHaSmuMQmMDq36J_MlY3naYzGqLvWCxWLV4x-zXmKl4DzG9iH6bkcepBwIqt67IFHr3Lu_19DNyAnxpKCjwnbLZqWpCd-N1K2KpNCmpPMC5CAJn_Xh9UMmZYrh1GqwdLu7zaG-VXWQBMZ-smNSRbMLbvc_1nmSo5kYgQ95W_DRiJr9ZUIAEiAQOJCoLD; n_mh=EyEgyFxFI5fiy-d_iT660NAbFEw22sfOXLkhKXhtwCs; sid_guard=0a7fb4782a2469191a11260deb6600df%7C1697889700%7C5184000%7CWed%2C+20-Dec-2023+12%3A01%3A40+GMT; uid_tt=f5fb5c4e17d03a8814b6ab396d1d541a; uid_tt_ss=f5fb5c4e17d03a8814b6ab396d1d541a; sid_tt=0a7fb4782a2469191a11260deb6600df; sessionid=0a7fb4782a2469191a11260deb6600df; sessionid_ss=0a7fb4782a2469191a11260deb6600df; store-region-src=uid; odin_tt=9bb93ac2d9f7879f1194d87fb406a5f2bbca349dac5a9e6a9cc88463a3a8248cc92d8d0572764c03c31e2c43e3ef7b21b75478c2de47d0661d7cef44965cb46241374f234830f7a0773b5f5b0e0bffa5",
         }
-        sig = self.get_xgorgon(uri, headers["Cookie"], '', 'max', headers)
+        if device_token:
+            headers['x-tt-dt'] = device_token
+        sig = self.get_xgorgon(uri, headers=headers)
         headers.update(sig)
         # headers["X-Gorgon"] = sig["xgorgon"]
         # headers["X-Khronos"] = sig["xkhronos"]
@@ -577,7 +755,7 @@ class TikTokApi:
         print("橱窗列表", res)
         return res
 
-    def get_keyword(self, device_id, iid, keyword, page):
+    def get_keyword(self, device_id, iid, keyword, page, device_token=''):
         """
         搜索视频
         :param device_id:
@@ -635,7 +813,9 @@ class TikTokApi:
             "Host": "aweme.snssdk.com",
             "Cookie": f"install_id={iid};",
         }
-        sig = self.get_xgorgon(url, '', urlencode(data), 'max', headers)
+        if device_token:
+            headers['x-tt-dt'] = device_token
+        sig = self.get_xgorgon(url, headers=headers, body=urlencode(data))
         headers.update(sig)
         print(headers)
         response = requests.post(url=url, headers=headers, data=data)
@@ -698,7 +878,7 @@ class TikTokApi:
             'x-tt-dt': ttdt
         }
 
-        sig = self.get_xgorgon(url, '', '', 'max', headers)
+        sig = self.get_xgorgon(url, headers=headers)
         headers.update(sig)
 
         response = requests.get(url, headers=headers).json()
@@ -1103,7 +1283,7 @@ class TikTokApi:
         print('小黄车商品：', resp)
         return resp
 
-    def get_video(self, secUid, page="0", iid='', device_id=''):
+    def get_video(self, secUid, page="0", iid='', device_id='', device_token=''):
         """
         获取作品列表
         :param secUid:
@@ -1143,7 +1323,9 @@ class TikTokApi:
             "X-Tt-Token": "0090e9070d88238e42336c3de32b0d9fab01d15b38e73d369d56440ae12f40059a673893d4b954ece8b30836b42f44e7e81e36019a313b94e6fc9f88df7ddbf6aa25dae2ecccfed26583b2a6ce6f16bc8c4ba95706a349e936ba62b6591e233330cbd-1.0.1"
         }
 
-        sig = self.get_xgorgon(url, '', '', 'max', headers)
+        if device_token:
+            headers['x-tt-dt'] = device_token
+        sig = self.get_xgorgon(url, headers=headers)
         headers.update(sig)
         response = requests.get(url, headers=headers)
         print("作品列表", response.text)
@@ -2280,18 +2462,20 @@ def run_buyin_sku(api, promotion_id, session_file=None):
 
 if __name__ == '__main__':
     api = TikTokApi(cid)
-    cookie = "passport_csrf_token=0d7ccd6001f05818320183425ce06da9; passport_csrf_token_default=0d7ccd6001f05818320183425ce06da9; store-region=cn-jx; install_id=7704017061957273145; ttreq=1$9d284cedf8ea2b6de8b2916c1af255675013ebab; passport_mfa_token=Cja326%2FXYRcMLQPc7tNMpLmPNJC3tdwkZFn8asaeDvz%2BoilifzL2X10jJNrw0S16PEYztEWXN9caSgo8AAAAAAAAAAAAAFEgAaIREALG3E0FqFydz4UraRWm%2FkQeEIOqxjUFbHLBTf88iw1cc%2Bl2F%2F%2F7eXfiUK3gEOWroQ4Y9rHRbCACIgEDvuQyFg%3D%3D; d_ticket=7f0a3e1abce0ae407ce472e6a6e817bb2a0cb; multi_sids=4140102066118552%3A70e87315796a2961c288e7e05346e988; passport_assist_user=ClDhnvLmRVKHXugriJJbSJR_yT9qNhsVnfL7sxCwK1cixWRQDHFyoR0gj4Fa-eDdtAkHO7dokODFeOtMZ393VtfH1XsiLcZ9zs0LBA1vAJ2CphpKCjwAAAAAAAAAAAAAUSC9k6pO-Hgv_EjSWO-mTYoJZup9UVxOXOXk8qrjUai81xg8nHwUKO7-nXPMOGiR59gQ5auhDhiJr9ZUIAEiAQOkueRN; n_mh=RFTaY-jAojtCt7jWGcid8TjPYNkvtyNT6WLQMlafxgE; sid_guard=70e87315796a2961c288e7e05346e988%7C1794393816%7C5184000%7CSun%2C+10-Jan-2027+10%3A43%3A36+GMT; uid_tt=d657a6c64dc79a3ffca9aa0d702c02a9; uid_tt_ss=d657a6c64dc79a3ffca9aa0d702c02a9; sid_tt=70e87315796a2961c288e7e05346e988; sessionid=70e87315796a2961c288e7e05346e988; sessionid_ss=70e87315796a2961c288e7e05346e988; session_tlb_tag=sttt%7C15%7CcOhzFXlqKWHCiOfgU0bpiP_________wnyFI5fclNl86_bLVJ31zFADsYva37XxTJCZQDZOWsDQ%3D; is_staff_user=false; has_biz_token=false; store-region-src=uid; ticket_guard_has_set_public_key=1; odin_tt=7cd8e23bbdfc4537601b9ec7684016aa50a9f80a6c7bc2c86326f2b82fffdac76afdfe7ff46daf1b15fb2197425689360404dff0245b678ec0187a9dbc63b7b5eed1939492fe8d68915cff8b631bf6bc"
-    device = {"iid": "7704017061957273145", "device_id": "1184648882315275", "klink_egdi": "AAIhNA5aKE_BdFbZPuDzJBmFTTs4asooF6ijl7wK3U6KS4Q6vqVEuvgP", "device_token":"AAAURARUMIEGCQNUZ2DPYFJP3DAHJ32MRUNRXJYX2CIXAJ7T22QJQXH6QCUUX3LKGPC3YRE2733TAJEQIWGW44GLWELAZIVRFDIFI55XAVO6B5MZJ6MUQO3LASFMVS7MMO74TFITKWGBCCOHYLP6X5Q"}
+    # device_id=1184648882315275 iid=7704017061957273145
+    # cookie = "passport_csrf_token=0d7ccd6001f05818320183425ce06da9; passport_csrf_token_default=0d7ccd6001f05818320183425ce06da9; store-region=cn-jx; install_id=7704017061957273145; ttreq=1$9d284cedf8ea2b6de8b2916c1af255675013ebab; passport_mfa_token=Cja326%2FXYRcMLQPc7tNMpLmPNJC3tdwkZFn8asaeDvz%2BoilifzL2X10jJNrw0S16PEYztEWXN9caSgo8AAAAAAAAAAAAAFEgAaIREALG3E0FqFydz4UraRWm%2FkQeEIOqxjUFbHLBTf88iw1cc%2Bl2F%2F%2F7eXfiUK3gEOWroQ4Y9rHRbCACIgEDvuQyFg%3D%3D; d_ticket=7f0a3e1abce0ae407ce472e6a6e817bb2a0cb; multi_sids=4140102066118552%3A70e87315796a2961c288e7e05346e988; passport_assist_user=ClDhnvLmRVKHXugriJJbSJR_yT9qNhsVnfL7sxCwK1cixWRQDHFyoR0gj4Fa-eDdtAkHO7dokODFeOtMZ393VtfH1XsiLcZ9zs0LBA1vAJ2CphpKCjwAAAAAAAAAAAAAUSC9k6pO-Hgv_EjSWO-mTYoJZup9UVxOXOXk8qrjUai81xg8nHwUKO7-nXPMOGiR59gQ5auhDhiJr9ZUIAEiAQOkueRN; n_mh=RFTaY-jAojtCt7jWGcid8TjPYNkvtyNT6WLQMlafxgE; sid_guard=70e87315796a2961c288e7e05346e988%7C1794393816%7C5184000%7CSun%2C+10-Jan-2027+10%3A43%3A36+GMT; uid_tt=d657a6c64dc79a3ffca9aa0d702c02a9; uid_tt_ss=d657a6c64dc79a3ffca9aa0d702c02a9; sid_tt=70e87315796a2961c288e7e05346e988; sessionid=70e87315796a2961c288e7e05346e988; sessionid_ss=70e87315796a2961c288e7e05346e988; session_tlb_tag=sttt%7C15%7CcOhzFXlqKWHCiOfgU0bpiP_________wnyFI5fclNl86_bLVJ31zFADsYva37XxTJCZQDZOWsDQ%3D; is_staff_user=false; has_biz_token=false; store-region-src=uid; ticket_guard_has_set_public_key=1; odin_tt=7cd8e23bbdfc4537601b9ec7684016aa50a9f80a6c7bc2c86326f2b82fffdac76afdfe7ff46daf1b15fb2197425689360404dff0245b678ec0187a9dbc63b7b5eed1939492fe8d68915cff8b631bf6bc"
+    # device = {"iid": "3506821196193386", "device_id": "3506821196189290", "klink_egdi": "AAJZ4JuyIl59E6nQJratgj5Ho-GmYJ8zKTvYlPg49Zqrrd91xiUw-8Ma", "device_token": "AAA4VU3TOEBKBTRWB7M6SS7T32IAWZQT665HKBSS7SDNGSQN76SYCKZY5MKJZO5DVWQ2466KI4IPVOZ43XTNLU3QZLR2LHPR32UNGH5EGWI4GEFS62P6TEREX7HWU", "cdid": "43d17ed3-10d8-454c-8cfe-d552aad9d6a9", "dtrait_token": "v0_WsaRWyYmkQIiQw+GfJ3AesHmzkHb+bRgySLA24PXCmlQUBSDuBSmHSXJ6sNIO3S5Y7y58Ly0e9d6FrfytmEzZ4HoiHphMAs4KO6aJN3Khp9/olX0eZaqdhvR5lTIxP/XO/UtOjXg06Di0nQCpYvz/kxs1ACqzuQj7thBpv5x1bpeec0QAuVHxImhit3u6r2Y"}
     ApiInfo = api.get_ApiInfo()
     print('Api信息:' + ApiInfo)
-    video_id = '7699720868088264866'
-    # print("发送验证码", api.app_send_code('',device))
-    print("评论详情", api.app_comment_list(video_id, device))
-    # print("播放上报", api.app_play_report(video_id, device, cookie))
+    # app取设备号
+    device = api.get_device()
+    video_id = '7401951329180077331'
+    print("发送验证码", api.app_send_code('',device))
+    # print("评论详情", api.app_comment_list(video_id, device))
+    # print("播放上报", api.app_play_report(video_id, device, ''))
     # api.getlive()
 
-    # app取设备号
-    # device = api.get_device()
+
 
     # api.get_ac_sign('')
     # cookie = ''
