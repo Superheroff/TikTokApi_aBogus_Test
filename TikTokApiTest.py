@@ -188,103 +188,14 @@ class TikTokApi:
               'Build/BP2A.250605.031.A3; Cronet/TTNetVersion:f2d9b21f 2026-10-12 '
               'QuicVersion:636d43af 2026-09-02)')
 
-    # 票据链静态字段：跨会话逐字节不变的部分（与真机抓包一致）。
-    # ree-public-key / client-cert / static-sign 三项不写死，由
-    # ticket_guard_headers() 按私钥与 sec-ts 动态生成，保证三者自洽。
-    TICKET_GUARD_HEADERS = {
-        'passport-sdk-settings': 'x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_2',
-        'passport-sdk-sign': 'x-tt-token,sec_user_id',
-        'bd-ticket-guard-tee-status': '0',
-        'bd-ticket-guard-iteration-version': '2',
-        'x-tt-request-tag': 'n=1;s=-1;p=0',
-    }
+    # 票据链只保留私钥；sec-ts 由 /dyapi/device/register 的 headers 提供。
+    # ree-public-key / client-cert / static-sign 不内置，统一由 /dyapi/xgorgon
+    # 用设备 sec-ts + 私钥现算（见 ticket_guard_payload），避免跨会话串用。
 
     # 本地 P-256 私钥标量（0x 十六进制）；公钥、证书、签名都由它当场派生。
     TICKET_GUARD_PRIVATE_KEY = '0xAA84079218C5004A1240DFAD3660A6CDA8C89D425D319A3AEC3B26A638F5667B'
-    # 服务端下发的 sec-ts 令牌，无法本地生成；为空则跳过 static-sign，不伪造。
-    TICKET_GUARD_SEC_TS = '#wi8I5o4ukHFXKd9PwjLIi72DJeCF5kEQIchWS2oQyCyyAb6fTDbV+ChjDRi6'
+    # sec-ts 由设备注册返回（headers），客户端不内置任何令牌。
 
-    # FIPS 186-4 / SEC 2 P-256 参数；签名与证书全部纯 Python 计算，不引第三方库。
-    _P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
-    _P256_A = _P256_P - 3
-    _P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
-    _P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
-    _P256_G = (0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
-               0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5)
-
-    @classmethod
-    def _p256_add(cls, u, v):
-        if u is None:
-            return v
-        if v is None:
-            return u
-        x, y = u
-        xx, yy = v
-        if x == xx and (y + yy) % cls._P256_P == 0:
-            return None
-        if u == v:
-            s = ((3 * x * x + cls._P256_A) * pow(2 * y, -1, cls._P256_P)) % cls._P256_P
-        else:
-            s = ((yy - y) * pow(xx - x, -1, cls._P256_P)) % cls._P256_P
-        nx = (s * s - x - xx) % cls._P256_P
-        return nx, (s * (x - nx) - y) % cls._P256_P
-
-    @classmethod
-    def _p256_mul(cls, k, point=None):
-        if not 0 < k < cls._P256_N:
-            raise ValueError('P-256 标量越界')
-        point = cls._P256_G if point is None else point
-        result = None
-        while k:
-            if k & 1:
-                result = cls._p256_add(result, point)
-            point = cls._p256_add(point, point)
-            k >>= 1
-        return result
-
-    @staticmethod
-    def _der_int(value):
-        raw = value.to_bytes((value.bit_length() + 7) // 8 or 1, 'big')
-        if raw[0] & 0x80:
-            raw = b'\x00' + raw
-        return b'\x02' + bytes([len(raw)]) + raw
-
-    @classmethod
-    def ticket_guard_headers(cls):
-        """按本地私钥与 sec-ts 动态生成票据链，静态字段原样保留。
-        私钥导出公钥 → 公钥写进 client-cert → 同一把钥匙对 sec-ts 做双重
-        SHA256 的 P-256 签名，三项因此始终自洽。sec-ts 是服务端下发的令牌，
-        不能本地生成；缺省时只跳过 static-sign，不伪造。
-        """
-        raw_key = cls.TICKET_GUARD_PRIVATE_KEY
-        if isinstance(raw_key, str):
-            raw_key = bytes.fromhex(raw_key[2:] if raw_key[:2].lower() == '0x' else raw_key)
-        private = int.from_bytes(raw_key, 'big') if isinstance(raw_key, bytes) else int(raw_key)
-        if not 0 < private < cls._P256_N:
-            raise ValueError('TICKET_GUARD_PRIVATE_KEY 不在 P-256 有效范围内')
-        x, y = cls._p256_mul(private)
-        public_raw = b'\x04' + x.to_bytes(32, 'big') + y.to_bytes(32, 'big')
-        headers = dict(cls.TICKET_GUARD_HEADERS)
-        headers['ticket_guard_private_key'] = cls.TICKET_GUARD_PRIVATE_KEY
-        sec_ts = cls.TICKET_GUARD_SEC_TS
-        if sec_ts:
-            headers['bd-ticket-guard-sec-ts'] = sec_ts
-        headers['bd-ticket-guard-ree-public-key'] = base64.b64encode(public_raw).decode()
-        headers['bd-ticket-guard-client-cert'] = base64.b64encode(
-            b'pub.' + base64.b64encode(public_raw)).decode()
-        if sec_ts:
-            digest = hashlib.sha256(('sec_ts=' + sec_ts).encode('utf-8')).digest()
-            z = int.from_bytes(hashlib.sha256(digest).digest(), 'big')
-            while True:
-                k = random.randrange(1, cls._P256_N)
-                r = cls._p256_mul(k)[0] % cls._P256_N
-                s = (pow(k, -1, cls._P256_N) * (z + r * private)) % cls._P256_N
-                if r and s:
-                    body = cls._der_int(r) + cls._der_int(s)
-                    headers['bd-ticket-guard-static-sign'] = base64.b64encode(
-                        b'\x30' + bytes([len(body)]) + body).decode()
-                    break
-        return headers
 
     @staticmethod
     def _signer_body_text(resp):
@@ -300,6 +211,54 @@ class TikTokApi:
     def _query_value(url, key):
         values = parse_qs(urlparse(url).query).get(key)
         return values[0] if values else None
+
+    @staticmethod
+    def device_headers(device):
+        """取 /dyapi/device/register 返回的 headers；兼容旧的 cookie/csrf/sec_ts/xbb 散字段。"""
+        device = device or {}
+        headers = {str(k): str(v) for k, v in (device.get('headers') or {}).items()
+                   if v not in (None, '')}
+        legacy = {'cookie': device.get('cookie'),
+                  'x-tt-passport-csrf-token': device.get('csrf'),
+                  'bd-ticket-guard-sec-ts': device.get('sec_ts')}
+        for name, value in legacy.items():
+            if value and name not in headers:
+                headers[name] = str(value)
+        for name, value in (device.get('xbb') or {}).items():
+            headers.setdefault(str(name), str(value))
+        return headers
+
+    @staticmethod
+    def device_env(device):
+        """从注册返回的 profile 取 device_type/brand/resolution(高*宽)/dpi，避免各处写死机型。"""
+        profile = device.get('profile') or {}
+        model = str(profile.get('device_model') or '2407FRK8EC')
+        brand = str(profile.get('device_brand') or 'Redmi')
+        raw = str(profile.get('resolution') or '2522x1220')
+        if '*' in raw:
+            resolution = raw
+        else:
+            width, _, height = raw.partition('x')
+            resolution = (height + '*' + width) if (width.isdigit() and height.isdigit()) else '1220*2522'
+        dpi = str(profile.get('density_dpi') or 520)
+        return model, brand, resolution, dpi
+
+    @classmethod
+    def ticket_guard_payload(cls, device):
+        """给 /dyapi/xgorgon 的 bd_ticket_guard：设备 sec-ts + 本地私钥，换来三件套回显。
+
+        设备没有 sec-ts 时返回 None——那种情况下服务端本来也不会给
+        static-sign / client-cert，传空壳只会被忽略。
+        """
+        headers = cls.device_headers(device)
+        sec_ts = headers.get('bd-ticket-guard-sec-ts') or ''
+        if not sec_ts:
+            return None
+        payload = {name: value for name, value in headers.items()
+                   if name.lower().startswith('bd-ticket-guard-')}
+        payload['ticket_guard_private_key'] = (device.get('ticket_guard_private_key')
+                                               or cls.TICKET_GUARD_PRIVATE_KEY)
+        return payload
 
     def get_xgorgon(
             self,
@@ -453,28 +412,34 @@ class TikTokApi:
     def app_comment_list(self, aweme_id, device, cursor=0, count=20, timeout=30):
         """APP 评论采集：本地签名后直接请求 comment/list。
 
-        device 至少含 device_id / iid，cdid 与 device_token 有就一起带上。
+        device 用 /dyapi/device/register 的返回：设备号取外层，请求头取 device['headers']
+        （x-tt-dt 与 x-bb-*）；机型参数由 profile 推导，不再写死。
         """
         now_ms = int(time.time() * 1000)
+        device_type, device_brand, resolution, dpi = self.device_env(device)
         query = urlencode({
             'aweme_id': str(aweme_id), 'cursor': str(cursor), 'count': str(count),
             'item_type': '0', 'insert_ids': '', 'comment_scene': '0', 'page_source': '0',
             'device_id': str(device['device_id']), 'iid': str(device['iid']),
             'cdid': str(device.get('cdid', '')), 'aid': '1128', 'app_name': 'aweme',
             'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
-            'os': 'android', 'ssmix': 'a', 'device_type': '2407FRK8EC', 'device_brand': 'Redmi',
-            'language': 'zh', 'os_api': '36', 'os_version': '16', 'channel': 'xiaomi_1128_64',
-            'manifest_version_code': '410001', 'resolution': '1220*2522', 'dpi': '520',
+            'os': 'android', 'ssmix': 'a', 'device_type': device_type,
+            'device_brand': device_brand, 'language': 'zh', 'os_api': '36',
+            'os_version': '16', 'channel': 'xiaomi_1128_64',
+            'manifest_version_code': '410001', 'resolution': resolution, 'dpi': dpi,
             'update_version_code': '41009900', 'package': 'com.ss.android.ugc.aweme',
             'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'ac': 'wifi',
             '_rticket': str(now_ms), 'ts': str(now_ms // 1000),
         })
         url = 'https://api3-normal-c.amemv.com/aweme/v2/comment/list/?' + query
+        device_headers = self.device_headers(device)
         headers = {
             'user-agent': self.APP_UA,
-            'x-tt-dt': str(device.get('device_token', '')),
+            'x-tt-dt': str(device_headers.get('x-tt-dt') or device.get('device_token', '')),
             'x-ss-req-ticket': str(now_ms),
             'accept-encoding': 'gzip',
+            **{name: str(value) for name, value in device_headers.items()
+               if name.startswith('x-bb-') and name != 'x-bb-signal'},
         }
         headers.update({str(k): str(v) for k, v in self.get_xgorgon(url, headers=headers).items()})
         response = requests.get(url, headers=headers, timeout=timeout)
@@ -522,9 +487,11 @@ class TikTokApi:
     def app_send_code(self, phone, device, country_code='+86', timeout=30):
         """发送验证码：明文写在这里，加密交给 /dyapi/tt_encrypt。
 
-        plain 为原生表单明文（mobile 明文，type=3731 / unbind_exist=35 即 XOR5 结果）；
-        接口返回 {'result': base64}，本方法把该 base64 作为请求体并参与签名。
-        默认 dry-run 只返回待发请求；send=True 才真正 POST。
+        设备信息全部取自 /dyapi/device/register：
+          外层      -> device_id / iid / cdid / klink_egdi / device_token
+          headers   -> cookie / x-tt-passport-csrf-token / x-tt-device-dtrait-token /
+                       bd-ticket-guard-sec-ts / x-bb-*
+        票据三件套由 /dyapi/xgorgon 用设备 sec-ts + 本地私钥现算，不再发写死的常量。
         """
         now_ms = int(time.time() * 1000)
         plain = (
@@ -536,18 +503,26 @@ class TikTokApi:
             '&passport_support_flow=choose_account,captcha,real_name_check,verify'
             '&unbind_exist=35&verify_sdk_version=4.2.2.cn&is_from_iesaccountsaas=1'
         )
+        # nocaptcha 验证后重试：把验证结果作为 body 参数追加（对应 App 的 body putAll）
+        if device.get('extra_body'):
+            extra = device['extra_body']
+            if isinstance(extra, dict):
+                plain += ''.join('&%s=%s' % (quote(str(k), safe=''), quote(str(v), safe=''))
+                                 for k, v in extra.items() if v)
         # 发码 body 必须是裸 TTEncrypt 二进制：接口 gzip=False 返回裸密文 base64，解码还原。
         encoded = self.tt_encrypt(plain, gz=False)
         raw_body = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4))
+        device_type, device_brand, resolution, dpi = self.device_env(device)
         query = urlencode({
             'passport-sdk-version': '60763', 'request_from_account_sdk': '1',
             'is_from_ttaccountsdk': '1', 'klink_egdi': str(device.get('klink_egdi', '')),
             'iid': str(device['iid']), 'device_id': str(device['device_id']),
             'ac': 'wifi', 'channel': 'xiaomi_1128_64', 'aid': '1128', 'app_name': 'aweme',
             'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
-            'os': 'android', 'ssmix': 'a', 'device_type': '2407FRK8EC', 'device_brand': 'Redmi',
-            'language': 'zh', 'os_api': '36', 'os_version': '16', 'manifest_version_code': '410001',
-            'resolution': '1220*2522', 'dpi': '520', 'update_version_code': '41009900',
+            'os': 'android', 'ssmix': 'a', 'device_type': device_type,
+            'device_brand': device_brand, 'language': 'zh', 'os_api': '36',
+            'os_version': '16', 'manifest_version_code': '410001',
+            'resolution': resolution, 'dpi': dpi, 'update_version_code': '41009900',
             '_rticket': str(now_ms), 'package': 'com.ss.android.ugc.aweme',
             'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'is_guest_mode': '0',
             'app_type': 'normal', 'minor_status': '0', 'appTheme': 'light',
@@ -555,30 +530,30 @@ class TikTokApi:
             'is_android_fold': '0', 'ts': str(now_ms // 1000), 'cdid': str(device.get('cdid', '')),
         })
         url = 'https://api5-normal-lq.amemv.com/passport/mobile/send_code/?' + query
+        device_headers = self.device_headers(device)
         headers = {
             'user-agent': self.APP_UA,
             'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'accept-encoding': 'gzip, deflate, br', 'x-ss-dp': '1128', 'sdk-version': '2',
             'passport-sdk-version': '60763', 'x-vc-bdturing-sdk-version': '4.2.2.cn',
-            'x-tt-dt': str(device.get('device_token', '')), 'x-ss-req-ticket': str(now_ms),
+            'x-tt-dt': str(device_headers.get('x-tt-dt') or device.get('device_token', '')),
+            'x-ss-req-ticket': str(now_ms),
             'x-tt-cipher-version': '1.0.0', 'x-tt-encrypt-info': '1',
-            **({'cookie': str(device['cookie'])} if device.get('cookie') else {}),
-            **({'x-tt-passport-csrf-token': str(device['csrf'])} if device.get('csrf') else {}),
-            **({'x-tt-device-dtrait-token': str(device['dtrait_token'])} if device.get('dtrait_token') else {}),
-            **({'x-tt-device-dtrait': str(device['dtrait'])} if device.get('dtrait') else {}),
-            **self.ticket_guard_headers(),
-            **({str(k): str(v) for k, v in device['tg_headers'].items()
-                if not k.startswith('bd-ticket-guard-client-data') and not k.startswith('bd-ticket-guard-version')
-                and not k.startswith('bd-ticket-guard-iteration-version')} if device.get('tg_headers') else {}),
         }
+        for name in ('cookie', 'x-tt-passport-csrf-token', 'x-tt-device-dtrait-token'):
+            value = device_headers.get(name)
+            if value:
+                headers[name] = str(value)
+        # 设备级风控头：x-bb-data / x-bb-scene（x-bb-signal 由每次签名现算）
+        headers.update({name: str(value) for name, value in device_headers.items()
+                        if name.startswith('x-bb-') and name != 'x-bb-signal'})
 
-        # 票据链是会话观测值：私钥在 headers 里，get_xgorgon 会自动收进
-        # bd_ticket_guard 交给服务端，换取 static-sign / client-cert 等回显。
+        # 票据链：sec-ts 用设备自己的，私钥本地重算 static-sign/client-cert/ree-public-key。
         signed = self.get_xgorgon(url, body=raw_body.hex(), body_encoding='hex', headers=headers,
-                                  bd_ticket_guard=device.get('bd_ticket_guard'))
-        print(json.dumps(signed, ensure_ascii=False, indent=2))
+                                  bd_ticket_guard=self.ticket_guard_payload(device))
+        signed.pop('X-Perseus', None)  # 原生 send_code 不带 X-Perseus
         headers.update({str(k): str(v) for k, v in signed.items()})
-        resp = requests.post(url, data=raw_body, headers=headers, timeout=timeout, proxies={'http':'http://127.0.0.1:7890'})
+        resp = requests.post(url, data=raw_body, headers=headers, timeout=timeout)
         return resp.text
 
     def app_play_report(self, video_id, device, cookie=None, impr_id=None, play_ms=0, timeout=30):
@@ -614,31 +589,34 @@ class TikTokApi:
             ('batch_item_ids', str(video_id)),
             ('target_batch_count', '3'),
         ])
+        device_type, device_brand, resolution, dpi = self.device_env(device)
         query = urlencode({
             'device_id': str(device['device_id']), 'iid': str(device['iid']),
             'cdid': str(device.get('cdid', '')), 'aid': '1128', 'app_name': 'aweme',
             'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
-            'os': 'android', 'ssmix': 'a', 'device_type': '2407FRK8EC', 'device_brand': 'Redmi',
-            'language': 'zh', 'os_api': '36', 'os_version': '16', 'channel': 'xiaomi_1128_64',
-            'manifest_version_code': '410001', 'resolution': '1220*2522', 'dpi': '520',
+            'os': 'android', 'ssmix': 'a', 'device_type': device_type,
+            'device_brand': device_brand, 'language': 'zh', 'os_api': '36',
+            'os_version': '16', 'channel': 'xiaomi_1128_64',
+            'manifest_version_code': '410001', 'resolution': resolution, 'dpi': dpi,
             'update_version_code': '41009900', 'package': 'com.ss.android.ugc.aweme',
             'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'ac': 'wifi',
             '_rticket': str(now_ms), 'ts': str(now_ms // 1000),
         })
         url = 'https://aweme.snssdk.com/aweme/v1/aweme/stats/?' + query
+        device_headers = self.device_headers(device)
         headers = {
             'user-agent': self.APP_UA,
-            'x-tt-dt': str(device.get('device_token', '')),
+            'x-tt-dt': str(device_headers.get('x-tt-dt') or device.get('device_token', '')),
             'x-ss-req-ticket': str(now_ms),
             'content-type': 'application/x-www-form-urlencoded',
             'accept-encoding': 'identity',
-            **self.ticket_guard_headers()
-
+            **{name: str(value) for name, value in device_headers.items()
+               if name.startswith('x-bb-') and name != 'x-bb-signal'},
         }
-        print(headers)
         if cookie:
             headers['cookie'] = cookie
-        signed = self.get_xgorgon(url, body=body, headers=headers)
+        signed = self.get_xgorgon(url, body=body, headers=headers,
+                                  bd_ticket_guard=self.ticket_guard_payload(device))
         headers.update({str(k): str(v) for k, v in signed.items()})
         resp = requests.post(url, data=body.encode('utf-8'), headers=headers, timeout=timeout)
         return resp.text
@@ -655,11 +633,14 @@ class TikTokApi:
         return resp
 
     def get_device(self, proxy=None, model=None, brand=None, rom=None,
-                   resolution=None, dpi=None, oaid=None, bind=True):
-        """获取设备号：调用网关 /dyapi/device/register（注册 + dtrait 绑定 + 二次注册）
+                   resolution=None, dpi=None, oaid=None):
+        """获取设备：调用网关 /dyapi/device/register，一次跑完整流程。
 
-        一次调用只注册一台设备。服务端按「设备指纹 + OAID」判定设备，本接口每次
-        随机生成指纹与 OAID，因此每次调用都会返回一台新设备（同 IP 有创建配额）。
+        固定顺序：注册 -> 激活上报/轮询 -> passport 会话 -> dtrait 绑定
+        -> 二次注册取 dtrait_token -> get_sec_ts -> x-bb，没有分步开关。
+        返回值外层是设备号与流程状态，可直接当请求头的字段在 data['headers']：
+        cookie / x-tt-dt / x-tt-passport-csrf-token / x-tt-device-dtrait-token /
+        bd-ticket-guard-sec-ts / x-bb-scene / x-bb-data / x-bb-signal。
 
         :param proxy:      代理，支持 "http://user:pwd@host:port" 或 {"host","user","password"}
         :param model:      指定机型，缺省随机
@@ -668,8 +649,7 @@ class TikTokApi:
         :param resolution: 指定分辨率，如 1260*2720
         :param dpi:        指定 DPI
         :param oaid:       指定 OAID，缺省随机
-        :param bind:       是否执行 dtrait 绑定，默认 True
-        :return: 单个设备 dict
+        :return: 单台设备 dict（含 headers / activation / errors）
         """
         ts = str(time.time()).split('.')[0]
         header = {
@@ -677,10 +657,7 @@ class TikTokApi:
             'timestamp': ts,
             'user-agent': 'okhttp/3.10.0.12'
         }
-        params = {
-            'sign': self.set_sign,
-            'bind': 'true' if bind else 'false',
-        }
+        params = {'sign': self.set_sign}
         if proxy:
             params['proxy'] = proxy if isinstance(proxy, str) else json.dumps(proxy, ensure_ascii=False)
         for name, value in (('model', model), ('brand', brand), ('rom', rom),
@@ -688,15 +665,17 @@ class TikTokApi:
             if value not in (None, ''):
                 params[name] = str(value)
         resp = requests.post(TikTokApi.host + '/dyapi/device/register',
-                             data=params, headers=header, timeout=90)
+                             data=params, headers=header, timeout=180)
         try:
             data = resp.json()
         except ValueError:
             raise RuntimeError('设备注册接口返回非 JSON: %s %s' % (resp.status_code, resp.text[:200]))
         if resp.status_code != 200:
             raise RuntimeError('设备注册失败: %s %s' % (resp.status_code, data))
-        print('设备id:', data.get('device_id'), 'iid:', data.get('iid'),
-              'new_user:', data.get('new_user'), 'bound:', data.get('bound'))
+        # print('设备:', data.get('device_id'), data.get('iid'),
+        #       'headers:', sorted(data.get('headers') or {}))
+        if data.get('errors'):
+            print('阶段异常:', data['errors'])
         return data
 
     def __md5(self, string):
@@ -2467,12 +2446,16 @@ if __name__ == '__main__':
     # device = {"iid": "3506821196193386", "device_id": "3506821196189290", "klink_egdi": "AAJZ4JuyIl59E6nQJratgj5Ho-GmYJ8zKTvYlPg49Zqrrd91xiUw-8Ma", "device_token": "AAA4VU3TOEBKBTRWB7M6SS7T32IAWZQT665HKBSS7SDNGSQN76SYCKZY5MKJZO5DVWQ2466KI4IPVOZ43XTNLU3QZLR2LHPR32UNGH5EGWI4GEFS62P6TEREX7HWU", "cdid": "43d17ed3-10d8-454c-8cfe-d552aad9d6a9", "dtrait_token": "v0_WsaRWyYmkQIiQw+GfJ3AesHmzkHb+bRgySLA24PXCmlQUBSDuBSmHSXJ6sNIO3S5Y7y58Ly0e9d6FrfytmEzZ4HoiHphMAs4KO6aJN3Khp9/olX0eZaqdhvR5lTIxP/XO/UtOjXg06Di0nQCpYvz/kxs1ACqzuQj7thBpv5x1bpeec0QAuVHxImhit3u6r2Y"}
     ApiInfo = api.get_ApiInfo()
     print('Api信息:' + ApiInfo)
-    # app取设备号
+    # app 取设备号：/dyapi/device/register 一次跑完整流程
+    # 注册 -> 激活 -> passport 会话 -> dtrait 绑定 -> 二次注册 -> sec_ts -> x-bb
+    # 可选：proxy='user:pwd@host:port'、model='PGT-AN00'、oaid='...'
     device = api.get_device()
+    print('device:', device)
+    print('headers:', device['headers'])
     video_id = '7401951329180077331'
-    print("发送验证码", api.app_send_code('',device))
-    # print("评论详情", api.app_comment_list(video_id, device))
-    # print("播放上报", api.app_play_report(video_id, device, ''))
+    print("发送验证码", api.app_send_code('', device))
+    print("评论详情", api.app_comment_list(video_id, device))
+    print("播放上报", api.app_play_report(video_id, device, ''))
     # api.getlive()
 
 

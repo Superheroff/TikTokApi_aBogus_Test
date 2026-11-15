@@ -11,7 +11,7 @@
 | X-Gorgon、X-Khronos... | 安卓41.0 |
 
 
-## 响应示例
+## XGorgon响应示例
 ```json
 {
   "X-Gorgon": "840480f80406179e69bd9d84810ea02d5d487f96aea5de725373",
@@ -23,7 +23,6 @@
   "X-Perseus": "LpLLLiTGIgDj/nbZQZRekIZ/CnFGzs1JGOZYQ/fYlyZtKSQOJThcLryK6WS/wXiYjbGJx/Ynn5jLzTM5idFG4LkwL4X/1qJtCpep0LCJPRXNDBIU3izoXKFZDZral2+M2w0wDc+piLCS+3syqCy26Han6Hw+zKnLjWhJXw9H7Ea106peN46O3cJIzjsEBiRiENfL+BAfg4+RFYBudCmQ5VasR8RfHFlmpqgyKcOiFJgaAJZ0GduVZ55PKE0EGrJaKwfXt94ipgeBL5kISPIh4dovO/MmKCLASQZMhSUGdOP+HrhEJEX48uVlzDdjShH/FyNloNLA7Q9yXx2kx8Wn2AHjkv/CFo0HiKZDwa7/rZ+bjoE5oOpqTURmaEqIx063jaIhW+6Ibb4UVbI8gbIqaxGV4vuXn7BG/ZUNKuVuH7OPG5LIoQFdvEI1oJTSEJU8DckZToaO/MXFNPuxyMLcAP3mSfCDeTyVitdrODHFhewVcXoVT9pFMU77HeoN3fNgG83qh54n7JpGMopPbUKcII4BUhsU9WvGoxMP7qGwYgkkzRyJf9+xdWrYn6xfYKz6NC8CcSuPIn3yBXdbNzwm8e3no2spK54sbLREiXnPbO8PjNz+jxSiba8XWCNycohQyCkybhzQf1xYxXbbqPiDjb7a8YnAVKkDw+zl/9FPFO+Ajar50GXk14jJJqNuBbx1nl/i3IB7G6OrG3GRkNltaXTMUBinecdrXxtpge/RobYo3J6TZtAvA/IaarqvA8EBcYASP7UDgbtMrYiSAcrkQlHgQKeMOks9M/RkuGPnlmnqFfJTXk1iuKvc/0lF/tF1D7Rt3emKPjNueonQp9Ff42l/yVlSWN9tiiiGwCJnwmAWreXQIpLX3JU/2GvUdSgXSdj9gOX7CPMrcdPqCMgTlUIYQTM8ESu0fRIffx66eR817D==",
   "X-SS-STUB": "33FA23E0C6248AF8BD26B9D985ED8849",
   "activity_now_client": "1794584381615",
-  "x-bb-signal": "1794584381615",
   "x-ss-req-ticket": "1794584381615",
   "x-tt-passport-trace-id": "login_e7ed24216dc81351b1b1d93efcc94345",
   "x-tt-passport-verify-portrait-outer": "732737c0-facd-4a4d-b123-4c6da6ff66ac.login",
@@ -37,7 +36,51 @@
   "bd-ticket-guard-static-sign": "MEUCIQCwlAKpMF4ijWf5R30tcxKJnedGGOd++PJ1Vqj9x93SFAIgNP7FZjWwfgwccNcb9R6qjM73itO08b8Ib62lx7adbnk="
 }
 ```
-
+## 设备注册响应示例
+```json
+{
+  "device_id": "1853156519623098",
+  "iid": "1853156519872954",
+  "cdid": "35655228-428a-469c-a19e-ec4d04b8b09e",
+  "klink_egdi": "AALdP3kTHfHFfbZrmtYOgyPvXzaR8IuAn_gNAaLNeGFf29FxK6iKmTKo",
+  "device_token": "AAAQMQTTR5VTENCCZNLNT76VEECBVOT6XU5QHEJH54P6JRT6GKRZD4HFFME5724XIGMPTUJOX4QL4RJ4ENZC2WUTZYRRFRY3AWEBDAYBTJWZUQMIQTBV7D42TD3K4QNLWJHMQSJHKYQLPFFZSBGAIXI",
+  "dtrait_token": "v0_wXyMFqt8RfzTIY5/Kuit3MriM2VvBVLkEjmgSvp0n+si+OP31Lj0b1FUAebi0xb8sTs8PN0nCjRKSskyAIwUHZlW2zWNSPyZ+yVWVBsD+rvqUaR0dvDXHeLEAvlsK4Tw1GDOXhRWOMGCK0//wuSTzVHJFkZ/31nXH+ImkP5WaXcLhxfNXypTjUtj4owB5LYk",
+  "dtrait_version": "a0",
+  "new_user": 1,
+  "update_new_user": 0,
+  "bound": true,
+  "profile": {
+    "device_model": "2211133C",
+    "device_brand": "Xiaomi",
+    "rom": "V816.0.7.0.UMCCNXM",
+    "resolution": "1220x2712",
+    "density_dpi": 480,
+    "cdid": "35655228-428a-469c-a19e-ec4d04b8b09e",
+    "openudid": "1a67d00f784d63c2",
+    "clientudid": "1b64877e-f6c9-43d5-b182-7f041906b23d",
+    "oaid": "90270bd19c730143"
+  },
+  "headers": {
+    "x-tt-dt": "AAAQMQTTR5VTENCCZNLNT76VEECBVOT6XU5QHEJH54P6JRT6GKRZD4HFFME5724XIGMPTUJOX4QL4RJ4ENZC2WUTZYRRFRY3AWEBDAYBTJWZUQMIQTBV7D42TD3K4QNLWJHMQSJHKYQLPFFZSBGAIXI",
+    "cookie": "passport_csrf_token=c8917ab864b8236b0acdf802be6f35ae; passport_csrf_token_default=c8917ab864b8236b0acdf802be6f35ae; reg-store-region=; store-region=cn-sh; store-region-src=did; odin_tt=9164adb99eb2e78de9a002045dcb351987f8927823a962041a24aba30b1b2ec5f0b68d63cc0e4f47e94fd3a7029fbe3a03516bc239bd4046fc87189d938d13a910f819bf316359dce6ea0eded9891278",
+    "x-tt-passport-csrf-token": "c8917ab864b8236b0acdf802be6f35ae",
+    "x-ss-dp": "1128",
+    "x-tt-device-dtrait-token": "v0_wXyMFqt8RfzTIY5/Kuit3MriM2VvBVLkEjmgSvp0n+si+OP31Lj0b1FUAebi0xb8sTs8PN0nCjRKSskyAIwUHZlW2zWNSPyZ+yVWVBsD+rvqUaR0dvDXHeLEAvlsK4Tw1GDOXhRWOMGCK0//wuSTzVHJFkZ/31nXH+ImkP5WaXcLhxfNXypTjUtj4owB5LYk",
+    "bd-ticket-guard-sec-ts": "#7iWsERhBhd292nhS/RB12bcJo4cWE7wo9A0vtejbcGMAJqon0ljG2RElbBCg",
+    "x-bb-scene": "17",
+    "x-bb-data": "RWPWu8ybYHigvO4oK53vq0JEH45zENDCdZALwRE+COCCFy2G1A2lkb6ohw61LXpYHqV7IoFE9iqIImk1Km99JTB+g+YUsj7t5sHD0MnaNs/LneL3acNyLgJZsVg867oqgkjAA4MDlYCRNLR7aFPqMRSHdcO7+pwc3qff7rTh01EujBOXlZ+pdwko9oNpj2Xg8gh5BqRmKxRvv66EKVMfzLZztlwSlA1/6J+dVnD2GkPjlVSp+wn0NLQ7qNkMUCRgmK6fXpajomU/mTj60vFEUxmfMoSYdMuxQ52Q0GnMOuLiX0NXE9EH1U6q/+zVm6Ghje4W2sbonzQOW2NIb+nXg1gcWBHu55kWAtZ1lFYM+69E7IaQUkRjiT/WKp3LFs+XNJwBI/r5eryGo0hSpFfXcn+t8BO1ZbEpjZ6iU7li3UnK4IdwSwNKaJxfo9LpFeGEFXpFN2EI7XF26YrDpS/cDmSh5F/rdr48TzKS5F3OxY7AFdvF+rH0T5bCb45TzfwT6fnoPrqdBF+p4ukFpo74GpFMr0DVnQHqzebVGCBuJG/np3LjpHplm9tm2ddadjmW+/JsKNvdJUWgoG4BWaSkADMr4XjzhlUyzK1k27QIq6vdW9LiElC2ZuY+NhzXJ+Vh5lYU6po3+8uLXfyHThaydg77sEgYhbKjU7mXlQv+lnmv3YdZnLvu5fk=",
+    "x-bb-signal": "1794769365747"
+  },
+  "activation": {
+    "launch_status": 200,
+    "launch_response": "{\"blocklist\":{\"v1\":[],\"v3\":[\"scene_start\",\"luckydog_timetask_upload_result\",\"upload_time_result\",\"luckydog_plugin_aar_loaded\",\"livesdk_pitaya_normal_rerank_tracking\"]},\"magic_tag\":\"ss_app_log\",\"message\":\"success\",\"server_time\":1794769358}",
+    "activated": true,
+    "activation_response": "{\"message\":\"success\",\"data\":{\"is_activated\":1}}",
+    "activation_status": 200
+  },
+  "errors": {}
+}
+```
 
 # bd_ticket_guard_client_data
 - Cookie bd_ticket_guard_client_data生成
