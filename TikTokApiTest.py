@@ -252,10 +252,16 @@ class TikTokApi:
         """
         headers = cls.device_headers(device)
         sec_ts = headers.get('bd-ticket-guard-sec-ts') or ''
-        if not sec_ts:
-            return None
         payload = {name: value for name, value in headers.items()
                    if name.lower().startswith('bd-ticket-guard-')}
+        # 真机 Ticket-Guard 身份（bundle）：整组透传，不需要 sec-ts，也不能带本地私钥，
+        # 否则 /dyapi/xgorgon 会用本地私钥重算 client-cert / ree-public-key，
+        # 覆盖真机那对公钥，服务端随即判定 atp 与设备不匹配。
+        if payload.get('bd-ticket-guard-atp'):
+            payload.pop('ticket_guard_private_key', None)
+            return payload
+        if not sec_ts:
+            return None
         payload['ticket_guard_private_key'] = (device.get('ticket_guard_private_key')
                                                or cls.TICKET_GUARD_PRIVATE_KEY)
         return payload
@@ -422,12 +428,12 @@ class TikTokApi:
             'item_type': '0', 'insert_ids': '', 'comment_scene': '0', 'page_source': '0',
             'device_id': str(device['device_id']), 'iid': str(device['iid']),
             'cdid': str(device.get('cdid', '')), 'aid': '1128', 'app_name': 'aweme',
-            'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
+            'version_code': '410100', 'version_name': '41.1.0', 'device_platform': 'android',
             'os': 'android', 'ssmix': 'a', 'device_type': device_type,
             'device_brand': device_brand, 'language': 'zh', 'os_api': '36',
             'os_version': '16', 'channel': 'xiaomi_1128_64',
-            'manifest_version_code': '410001', 'resolution': resolution, 'dpi': dpi,
-            'update_version_code': '41009900', 'package': 'com.ss.android.ugc.aweme',
+            'manifest_version_code': '410101', 'resolution': resolution, 'dpi': dpi,
+            'update_version_code': '41109900', 'package': 'com.ss.android.ugc.aweme',
             'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'ac': 'wifi',
             '_rticket': str(now_ms), 'ts': str(now_ms // 1000),
         })
@@ -495,10 +501,10 @@ class TikTokApi:
         """
         now_ms = int(time.time() * 1000)
         plain = (
-            'is_vcd=1&reg_cookie_opt=true&ttnet_sdk_version=4.2.301.15-douyin&auto_read=0'
-            '&auth_sdk_version=4.7.7-rc.48&mix_mode=1&account_app_language=zh&mobile='
+            'is_vcd=1&reg_cookie_opt=true&ttnet_sdk_version=4.2.301.18-douyin&auto_read=0'
+            '&auth_sdk_version=4.7.7-rc.52&mix_mode=1&account_app_language=zh&mobile='
             + quote(country_code + ' ' + str(phone), safe='') +
-            '&language=zh&multi_login=1&type=3731&sec_sdk_version=67765248'
+            '&language=zh&multi_login=1&type=3731&sec_sdk_version=67765504'
             '&account_sdk_source=app'
             '&passport_support_flow=choose_account,captcha,real_name_check,verify'
             '&unbind_exist=35&verify_sdk_version=4.2.2.cn&is_from_iesaccountsaas=1'
@@ -509,25 +515,27 @@ class TikTokApi:
             if isinstance(extra, dict):
                 plain += ''.join('&%s=%s' % (quote(str(k), safe=''), quote(str(v), safe=''))
                                  for k, v in extra.items() if v)
-        # 发码 body 必须是裸 TTEncrypt 二进制：接口 gzip=False 返回裸密文 base64，解码还原。
+        # 实测：TTEncrypt 后长度 == 真机 Content-Length(502)，即 body 就是 TTEncrypt 密文。
         encoded = self.tt_encrypt(plain, gz=False)
         raw_body = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4))
         device_type, device_brand, resolution, dpi = self.device_env(device)
         query = urlencode({
-            'passport-sdk-version': '60763', 'request_from_account_sdk': '1',
+            'passport-sdk-version': '60770', 'request_from_account_sdk': '1',
             'is_from_ttaccountsdk': '1', 'klink_egdi': str(device.get('klink_egdi', '')),
             'iid': str(device['iid']), 'device_id': str(device['device_id']),
             'ac': 'wifi', 'channel': 'xiaomi_1128_64', 'aid': '1128', 'app_name': 'aweme',
-            'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
+            'version_code': '410100', 'version_name': '41.1.0', 'device_platform': 'android',
             'os': 'android', 'ssmix': 'a', 'device_type': device_type,
             'device_brand': device_brand, 'language': 'zh', 'os_api': '36',
-            'os_version': '16', 'manifest_version_code': '410001',
-            'resolution': resolution, 'dpi': dpi, 'update_version_code': '41009900',
+            'os_version': '16', 'manifest_version_code': '410101',
+            'resolution': resolution, 'dpi': dpi, 'update_version_code': '41109900',
             '_rticket': str(now_ms), 'package': 'com.ss.android.ugc.aweme',
             'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'is_guest_mode': '0',
             'app_type': 'normal', 'minor_status': '0', 'appTheme': 'light',
             'is_preinstall': '0', 'need_personal_recommend': '1', 'is_android_pad': '0',
             'is_android_fold': '0', 'ts': str(now_ms // 1000), 'cdid': str(device.get('cdid', '')),
+            'first_launch_timestamp': str(int(device.get('first_launch_timestamp') or (time.time() - 3600))),
+            'last_deeplink_update_version_code': '0',
         })
         url = 'https://api5-normal-lq.amemv.com/passport/mobile/send_code/?' + query
         device_headers = self.device_headers(device)
@@ -535,10 +543,14 @@ class TikTokApi:
             'user-agent': self.APP_UA,
             'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'accept-encoding': 'gzip, deflate, br', 'x-ss-dp': '1128', 'sdk-version': '2',
-            'passport-sdk-version': '60763', 'x-vc-bdturing-sdk-version': '4.2.2.cn',
+            'passport-sdk-version': '60770', 'x-vc-bdturing-sdk-version': '4.2.2.cn',
             'x-tt-dt': str(device_headers.get('x-tt-dt') or device.get('device_token', '')),
             'x-ss-req-ticket': str(now_ms),
             'x-tt-cipher-version': '1.0.0', 'x-tt-encrypt-info': '1',
+            # 41.1.0 真机实测新增头
+            'x-ttnet-bypass-to': '-1',
+            'passport-sdk-settings': 'x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_2',
+            'passport-sdk-sign': 'x-tt-token,sec_user_id',
         }
         for name in ('cookie', 'x-tt-passport-csrf-token', 'x-tt-device-dtrait-token'):
             value = device_headers.get(name)
@@ -593,12 +605,12 @@ class TikTokApi:
         query = urlencode({
             'device_id': str(device['device_id']), 'iid': str(device['iid']),
             'cdid': str(device.get('cdid', '')), 'aid': '1128', 'app_name': 'aweme',
-            'version_code': '410000', 'version_name': '41.0.0', 'device_platform': 'android',
+            'version_code': '410100', 'version_name': '41.1.0', 'device_platform': 'android',
             'os': 'android', 'ssmix': 'a', 'device_type': device_type,
             'device_brand': device_brand, 'language': 'zh', 'os_api': '36',
             'os_version': '16', 'channel': 'xiaomi_1128_64',
-            'manifest_version_code': '410001', 'resolution': resolution, 'dpi': dpi,
-            'update_version_code': '41009900', 'package': 'com.ss.android.ugc.aweme',
+            'manifest_version_code': '410101', 'resolution': resolution, 'dpi': dpi,
+            'update_version_code': '41109900', 'package': 'com.ss.android.ugc.aweme',
             'cpu_support64': 'true', 'host_abi': 'arm64-v8a', 'ac': 'wifi',
             '_rticket': str(now_ms), 'ts': str(now_ms // 1000),
         })
@@ -2446,15 +2458,14 @@ if __name__ == '__main__':
     # device = {"iid": "3506821196193386", "device_id": "3506821196189290", "klink_egdi": "AAJZ4JuyIl59E6nQJratgj5Ho-GmYJ8zKTvYlPg49Zqrrd91xiUw-8Ma", "device_token": "AAA4VU3TOEBKBTRWB7M6SS7T32IAWZQT665HKBSS7SDNGSQN76SYCKZY5MKJZO5DVWQ2466KI4IPVOZ43XTNLU3QZLR2LHPR32UNGH5EGWI4GEFS62P6TEREX7HWU", "cdid": "43d17ed3-10d8-454c-8cfe-d552aad9d6a9", "dtrait_token": "v0_WsaRWyYmkQIiQw+GfJ3AesHmzkHb+bRgySLA24PXCmlQUBSDuBSmHSXJ6sNIO3S5Y7y58Ly0e9d6FrfytmEzZ4HoiHphMAs4KO6aJN3Khp9/olX0eZaqdhvR5lTIxP/XO/UtOjXg06Di0nQCpYvz/kxs1ACqzuQj7thBpv5x1bpeec0QAuVHxImhit3u6r2Y"}
     ApiInfo = api.get_ApiInfo()
     print('Api信息:' + ApiInfo)
-    # app 取设备号：/dyapi/device/register 一次跑完整流程
     # 注册 -> 激活 -> passport 会话 -> dtrait 绑定 -> 二次注册 -> sec_ts -> x-bb
     # 可选：proxy='user:pwd@host:port'、model='PGT-AN00'、oaid='...'
     device = api.get_device()
     print('device:', device)
     print('headers:', device['headers'])
     video_id = '7401951329180077331'
-    print("发送验证码", api.app_send_code('', device))
-    print("评论详情", api.app_comment_list(video_id, device))
+    # print("发送验证码", api.app_send_code('', device))
+    # print("评论详情", api.app_comment_list(video_id, device))
     print("播放上报", api.app_play_report(video_id, device, ''))
     # api.getlive()
 
